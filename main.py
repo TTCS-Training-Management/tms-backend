@@ -1,6 +1,7 @@
 from fastapi import FastAPI
+
 app = FastAPI()
 
 @app.get("/")
 def read_root():
-    return {"message": "Hello TMS Backend"}
+    return {"message": "Hello TMS Backend - SCRUM-54"}
