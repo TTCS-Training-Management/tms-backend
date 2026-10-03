@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template  
 
 from lesson import CourseLessonManager
 
@@ -7,6 +7,12 @@ app = Flask(__name__)
 
 manager = CourseLessonManager()
 
+# ==============================
+# GIAO DIỆN FRONTEND
+# ==============================
+@app.route("/", methods=["GET"])
+def index():
+    return render_template("index.html")
 
 # ==============================
 # TẠO DỮ LIỆU MẪU
@@ -24,6 +30,23 @@ manager.create_course(
     total_lessons=5
 )
 
+# ==============================
+# LẤY DANH SÁCH MÔN HỌC
+# ==============================
+
+@app.route("/api/courses", methods=["GET"])
+def get_courses():
+    try:
+        courses = manager.get_all_courses()
+
+        return jsonify({
+            "courses": courses
+        }), 200
+
+    except Exception as e:
+        return jsonify({
+            "message": str(e)
+        }), 500
 
 # ==============================
 # TẠO MÔN HỌC
