@@ -1,0 +1,6 @@
+@tms_backend_HostAddress = http://localhost:5277
+
+GET {{tms_backend_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
