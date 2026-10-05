@@ -5,3 +5,7 @@ python-dotenv
 pyodbc
 pytest
 httpx
+python-jose[cryptography]
+passlib[bcrypt]
+python-multipart
+pydantic-settings
