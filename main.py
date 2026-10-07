@@ -139,7 +139,7 @@ ROLE_PERMISSIONS: dict[str, dict[str, str]] = {
     },
     "admissions": {
         "courses": "R",
-        "leads": "F",
+        "leads": "W",
         "student_records": "W",
         "classes": "R",
         "reports": "R",
@@ -152,7 +152,7 @@ ROLE_PERMISSIONS: dict[str, dict[str, str]] = {
     },
     "training_manager": {
         "courses": "F",
-        "leads": "R",
+        "leads": "F",
         "student_records": "F",
         "classes": "F",
         "attendance": "F",
@@ -319,6 +319,17 @@ class Lead(Base):
     assigned_to_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+
+
+class LeadInteraction(Base):
+    __tablename__ = "lead_interactions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    lead_id: Mapped[int] = mapped_column(ForeignKey("leads.id", ondelete="CASCADE"), index=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(40))
+    note: Mapped[str] = mapped_column(String(2000))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
 class PasswordResetToken(Base):
@@ -690,6 +701,14 @@ def seed_database() -> None:
         for column, definition in migrations.items():
             if column not in existing_columns:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {column} {definition}"))
+        connection.execute(
+            text(
+                "UPDATE leads SET assigned_to_user_id = NULL "
+                "WHERE assigned_to_user_id IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM users "
+                "WHERE users.id = leads.assigned_to_user_id)"
+            )
+        )
     with SessionLocal() as db:
         for user in db.scalars(select(User)).all():
             if user.role == "lecturer":
@@ -934,7 +953,16 @@ def preview_user_import(
     if Path(file.filename or "").suffix.lower() != ".xlsx":
         raise HTTPException(status_code=400, detail="Chỉ chấp nhận tệp Excel .xlsx")
     valid_rows, errors = inspect_user_import(file.file.read(), db)
-    return {"valid": len(valid_rows), "skipped": len(errors), "errors": errors}
+    preview_rows = [
+        {key: value for key, value in row.items() if key != "initial_password"}
+        for row in valid_rows[:20]
+    ]
+    return {
+        "valid": len(valid_rows),
+        "skipped": len(errors),
+        "errors": errors,
+        "preview_rows": preview_rows,
+    }
 
 
 @app.post("/users/import-excel")
@@ -1528,6 +1556,72 @@ def clone_subject_sessions(
     return {"copied_count": len(source_sessions)}
 
 
+LEAD_STATUSES = {"new", "assigned", "contacted", "qualified", "converted", "lost"}
+LEAD_SOURCES = {"website", "facebook", "walkin", "referral"}
+
+
+def normalized_lead_phone(phone: str) -> str:
+    normalized = phone.replace(" ", "")
+    if normalized.startswith("+84"):
+        return "0" + normalized[3:]
+    if normalized.startswith("84"):
+        return "0" + normalized[2:]
+    return normalized
+
+
+def find_duplicate_lead(db: Session, phone: str, exclude_id: int | None = None) -> Lead | None:
+    statement = select(Lead)
+    if exclude_id is not None:
+        statement = statement.where(Lead.id != exclude_id)
+    normalized = normalized_lead_phone(phone)
+    return next((lead for lead in db.scalars(statement) if normalized_lead_phone(lead.phone) == normalized), None)
+
+
+def record_lead_interaction(
+    db: Session, lead: Lead, user: User | None, action: str, note: str
+) -> None:
+    db.add(
+        LeadInteraction(
+            lead_id=lead.id,
+            user_id=user.id if user else None,
+            action=action,
+            note=note[:2000],
+        )
+    )
+
+
+def ensure_lead_access(db: Session, user: User, lead: Lead) -> None:
+    if not permission_allows(assigned_roles(db, user), "leads", "full") and lead.assigned_to_user_id != user.id:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lead")
+
+
+def validate_lead_fields(payload: dict[str, Any], current: Lead | None = None) -> dict[str, Any]:
+    full_name = str(payload.get("full_name", current.full_name if current else "")).strip()
+    phone = str(payload.get("phone", current.phone if current else "")).strip()
+    email = str(payload.get("email", current.email if current else "") or "").strip()
+    source = str(payload.get("source", current.source if current else "walkin"))
+    program_interest = str(payload.get("program_interest", current.program_interest if current else "") or "").strip()
+    notes = str(payload.get("notes", current.notes if current else "") or "").strip()
+    if not full_name or not phone:
+        raise HTTPException(status_code=422, detail="Họ tên và số điện thoại là bắt buộc")
+    if len(full_name) > 120 or len(phone) > 40 or len(program_interest) > 200 or len(notes) > 4000:
+        raise HTTPException(status_code=422, detail="Thông tin lead vượt quá độ dài cho phép")
+    if not re.fullmatch(r"^(\+84|84|0)[0-9]{9,10}$", phone.replace(" ", "")):
+        raise HTTPException(status_code=422, detail="Số điện thoại không hợp lệ")
+    if email and (len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)):
+        raise HTTPException(status_code=422, detail="Email không hợp lệ")
+    if source not in LEAD_SOURCES:
+        raise HTTPException(status_code=422, detail="Nguồn lead không hợp lệ")
+    return {
+        "full_name": full_name,
+        "phone": phone.replace(" ", ""),
+        "email": email or None,
+        "source": source,
+        "program_interest": program_interest or None,
+        "notes": notes or None,
+    }
+
+
 @app.get("/leads")
 def list_leads(
     user: Annotated[User, Depends(require_permission("leads", "read"))],
@@ -1536,7 +1630,15 @@ def list_leads(
     status: str | None = None,
     source: str | None = None,
     assigned_to: int | None = None,
+    from_date: date | None = None,
+    to_date: date | None = None,
 ) -> list[dict[str, Any]]:
+    if status and status not in LEAD_STATUSES:
+        raise HTTPException(status_code=422, detail="Trạng thái lead không hợp lệ")
+    if source and source not in LEAD_SOURCES:
+        raise HTTPException(status_code=422, detail="Nguồn lead không hợp lệ")
+    if from_date and to_date and from_date > to_date:
+        raise HTTPException(status_code=422, detail="Ngày bắt đầu không được sau ngày kết thúc")
     statement = select(Lead)
     if q:
         q_like = f"%{q.strip()}%"
@@ -1547,22 +1649,46 @@ def list_leads(
         statement = statement.where(Lead.source == source)
     if assigned_to is not None:
         statement = statement.where(Lead.assigned_to_user_id == assigned_to)
+    if from_date:
+        statement = statement.where(Lead.created_at >= datetime.combine(from_date, datetime.min.time()))
+    if to_date:
+        statement = statement.where(Lead.created_at < datetime.combine(to_date + timedelta(days=1), datetime.min.time()))
     if not permission_allows(assigned_roles(db, user), "leads", "full"):
         statement = statement.where(Lead.assigned_to_user_id == user.id)
     leads = db.scalars(statement.order_by(Lead.created_at.desc())).all()
-    return [{
-        "id": item.id,
-        "full_name": item.full_name,
-        "phone": item.phone,
-        "email": item.email,
-        "source": item.source,
-        "status": item.status,
-        "program_interest": item.program_interest,
-        "notes": item.notes,
-        "assigned_to_user_id": item.assigned_to_user_id,
-        "assigned_to_name": db.get(User, item.assigned_to_user_id).full_name if item.assigned_to_user_id else None,
-        "created_at": item.created_at.isoformat(),
-    } for item in leads]
+    result = []
+    for item in leads:
+        assigned_user = (
+            db.get(User, item.assigned_to_user_id)
+            if item.assigned_to_user_id is not None
+            else None
+        )
+        result.append({
+            "id": item.id,
+            "full_name": item.full_name,
+            "phone": item.phone,
+            "email": item.email,
+            "source": item.source,
+            "status": item.status,
+            "program_interest": item.program_interest,
+            "notes": item.notes,
+            "assigned_to_user_id": assigned_user.id if assigned_user else None,
+            "assigned_to_name": assigned_user.full_name if assigned_user else None,
+            "created_at": item.created_at.isoformat(),
+        })
+    return result
+
+
+@app.get("/leads/duplicate-check")
+def check_duplicate_lead(
+    _: Annotated[User, Depends(require_permission("leads", "write"))],
+    db: DbSession,
+    phone: str,
+    exclude_id: int | None = None,
+) -> dict[str, bool]:
+    if not re.fullmatch(r"^(\+84|84|0)[0-9]{9,10}$", phone.replace(" ", "")):
+        raise HTTPException(status_code=422, detail="Số điện thoại không hợp lệ")
+    return {"duplicate": find_duplicate_lead(db, phone, exclude_id) is not None}
 
 
 @app.post("/leads", status_code=status.HTTP_201_CREATED)
@@ -1571,30 +1697,15 @@ def create_lead_internal(
     db: DbSession,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
-    full_name = str(payload.get("full_name", "")).strip()
-    phone = str(payload.get("phone", "")).strip()
-    email = str(payload.get("email") or "").strip()
-    source = str(payload.get("source", "walkin"))
-    if not full_name or not phone:
-        raise HTTPException(status_code=422, detail="Họ tên và số điện thoại là bắt buộc")
-    if not re.fullmatch(r"^(\+84|84|0)[0-9]{9,10}$", phone.replace(" ", "")):
-        raise HTTPException(status_code=422, detail="Số điện thoại không hợp lệ")
-    if email and (len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)):
-        raise HTTPException(status_code=422, detail="Email không hợp lệ")
-    if source not in {"website", "facebook", "walkin", "referral"}:
-        raise HTTPException(status_code=422, detail="Nguồn lead không hợp lệ")
-    if db.scalar(select(Lead).where(Lead.phone == phone, Lead.full_name == full_name)):
-        raise HTTPException(status_code=409, detail="Lead này đã được ghi nhận trước đó")
-    lead = Lead(
-        full_name=full_name,
-        phone=phone,
-        email=email or None,
-        source=source,
-        program_interest=payload.get("program_interest") or None,
-        notes=payload.get("notes") or None,
-        status="new",
-    )
+    fields = validate_lead_fields(payload)
+    if find_duplicate_lead(db, fields["phone"]):
+        raise HTTPException(status_code=409, detail="Số điện thoại đã tồn tại trong lead khác")
+    lead = Lead(**fields, status="new", assigned_to_user_id=user.id)
     db.add(lead)
+    db.flush()
+    record_lead_interaction(db, lead, user, "created", "Tạo lead")
+    if fields["notes"]:
+        record_lead_interaction(db, lead, user, "note", fields["notes"])
     db.commit()
     db.refresh(lead)
     return {"id": lead.id, "full_name": lead.full_name, "status": lead.status}
@@ -1621,20 +1732,11 @@ def create_lead_public(
 ) -> dict[str, str]:
     if payload.get("website"):
         raise HTTPException(status_code=400, detail="Yêu cầu không hợp lệ")
-    full_name = str(payload.get("full_name", "")).strip()
-    phone = str(payload.get("phone", "")).strip()
-    if not full_name or not phone:
-        raise HTTPException(status_code=422, detail="Họ tên và số điện thoại là bắt buộc")
-    if len(full_name) > 200 or len(phone) > 30 or len(str(payload.get("notes") or "")) > 2000:
-        raise HTTPException(status_code=422, detail="Thông tin đăng ký vượt quá độ dài cho phép")
-    if not re.fullmatch(r"^(\+84|84|0)[0-9]{9,10}$", phone.replace(" ", "")):
-        raise HTTPException(status_code=422, detail="Số điện thoại không hợp lệ")
-    email = str(payload.get("email") or "").strip()
-    if email and (len(email) > 254 or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)):
-        raise HTTPException(status_code=422, detail="Email không hợp lệ")
-    exists = db.scalar(select(Lead).where(Lead.phone == phone, Lead.full_name == full_name))
-    if exists:
-        raise HTTPException(status_code=409, detail="Lead này đã được ghi nhận trước đó")
+    fields = validate_lead_fields({**payload, "source": "website"})
+    if len(fields["notes"] or "") > 2000:
+        raise HTTPException(status_code=422, detail="Ghi chú tối đa 2000 ký tự")
+    if find_duplicate_lead(db, fields["phone"]):
+        raise HTTPException(status_code=409, detail="Số điện thoại đã được ghi nhận trước đó")
     client_ip = request.client.host if request.client else "unknown"
     client_hash = hmac.new(TOKEN_SECRET.encode(), client_ip.encode(), hashlib.sha256).hexdigest()
     now = datetime.now(timezone.utc)
@@ -1656,17 +1758,11 @@ def create_lead_public(
             PublicLeadAttempt.created_at < now - timedelta(days=1)
         )
     )
-    lead = Lead(
-        full_name=full_name,
-        phone=phone,
-        email=email or None,
-        source="website",
-        program_interest=(payload.get("program_interest") or None),
-        notes=(payload.get("notes") or None),
-        status="new",
-    )
+    lead = Lead(**fields, status="new")
     db.add(PublicLeadAttempt(client_hash=client_hash, created_at=now))
     db.add(lead)
+    db.flush()
+    record_lead_interaction(db, lead, None, "created", "Lead gửi từ biểu mẫu công khai")
     db.commit()
     return {"message": "Đăng ký tư vấn thành công. Bộ phận tuyển sinh sẽ sớm liên hệ với bạn."}
 
@@ -1679,35 +1775,170 @@ def update_lead(
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     lead = db.get(Lead, lead_id)
-    if not lead: raise HTTPException(404, "Không tìm thấy lead")
-    if "status" in payload and payload["status"]:
-        lead.status = str(payload["status"])
-    if "notes" in payload:
-        lead.notes = payload["notes"]
-    if "program_interest" in payload:
-        lead.program_interest = payload["program_interest"]
-    if "assigned_to_user_id" in payload:
-        lead.assigned_to_user_id = int(payload["assigned_to_user_id"]) if payload["assigned_to_user_id"] else None
-    db.commit(); db.refresh(lead)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lead")
+    ensure_lead_access(db, user, lead)
+    editable_fields = {"full_name", "phone", "email", "source", "program_interest", "notes", "status"}
+    if not payload or not set(payload).issubset(editable_fields):
+        raise HTTPException(status_code=422, detail="Trường cập nhật lead không hợp lệ")
+    changed: list[str] = []
+    if set(payload) & {"full_name", "phone", "email", "source", "program_interest", "notes"}:
+        fields = validate_lead_fields(payload, lead)
+        if normalized_lead_phone(fields["phone"]) != normalized_lead_phone(lead.phone):
+            if find_duplicate_lead(db, fields["phone"], lead.id):
+                raise HTTPException(status_code=409, detail="Số điện thoại đã tồn tại trong lead khác")
+        for key, value in fields.items():
+            if key in payload and getattr(lead, key) != value:
+                setattr(lead, key, value)
+                changed.append(key)
+    if "status" in payload:
+        new_status = str(payload["status"])
+        if new_status not in LEAD_STATUSES:
+            raise HTTPException(status_code=422, detail="Trạng thái lead không hợp lệ")
+        if new_status != lead.status:
+            lead.status = new_status
+            changed.append("status")
+    if changed:
+        record_lead_interaction(db, lead, user, "updated", f"Đã cập nhật: {', '.join(changed)}")
+    db.commit()
+    db.refresh(lead)
     return {"id": lead.id, "status": lead.status, "assigned_to_user_id": lead.assigned_to_user_id}
 
 
 @app.post("/leads/{lead_id}/assign")
 def assign_lead(
     lead_id: int,
-    user: Annotated[User, Depends(require_permission("leads", "write"))],
+    user: Annotated[User, Depends(require_permission("leads", "full"))],
     db: DbSession,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
     lead = db.get(Lead, lead_id)
-    if not lead: raise HTTPException(404, "Không tìm thấy lead")
-    assigned_to = int(payload.get("assigned_to_user_id") or 0)
-    if assigned_to and db.get(User, assigned_to) is None:
-        raise HTTPException(404, "Tư vấn viên không tồn tại")
-    lead.assigned_to_user_id = assigned_to or None
-    lead.status = "assigned"
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lead")
+    try:
+        assigned_to = int(payload.get("assigned_to_user_id") or 0) or None
+    except (TypeError, ValueError) as error:
+        raise HTTPException(status_code=422, detail="Người phụ trách không hợp lệ") from error
+    assignee = db.get(User, assigned_to) if assigned_to else None
+    if assigned_to and (
+        assignee is None
+        or not assignee.is_active
+        or not permission_allows(assigned_roles(db, assignee), "leads", "write")
+    ):
+        raise HTTPException(status_code=404, detail="Tư vấn viên không tồn tại hoặc không hoạt động")
+    lead.assigned_to_user_id = assigned_to
+    lead.status = "assigned" if assigned_to else "new"
+    record_lead_interaction(
+        db,
+        lead,
+        user,
+        "assignment",
+        f"Phân công cho {assignee.full_name}" if assignee else "Gỡ phân công",
+    )
     db.commit(); db.refresh(lead)
     return {"id": lead.id, "assigned_to_user_id": lead.assigned_to_user_id, "status": lead.status}
+
+
+@app.post("/leads/assign-bulk")
+def assign_leads_bulk(
+    user: Annotated[User, Depends(require_permission("leads", "full"))],
+    db: DbSession,
+    payload: dict[str, Any],
+) -> dict[str, int]:
+    raw_ids = payload.get("lead_ids")
+    if not isinstance(raw_ids, list) or not raw_ids or len(raw_ids) > 500:
+        raise HTTPException(status_code=422, detail="Chọn từ 1 đến 500 lead để phân công")
+    try:
+        lead_ids = list(dict.fromkeys(int(lead_id) for lead_id in raw_ids))
+        assigned_to = int(payload["assigned_to_user_id"]) if payload.get("assigned_to_user_id") else None
+    except (TypeError, ValueError, KeyError) as error:
+        raise HTTPException(status_code=422, detail="Thông tin phân công không hợp lệ") from error
+    leads = db.scalars(select(Lead).where(Lead.id.in_(lead_ids))).all()
+    if len(leads) != len(lead_ids):
+        raise HTTPException(status_code=404, detail="Một hoặc nhiều lead không tồn tại")
+    assignee = db.get(User, assigned_to) if assigned_to is not None else None
+    if assigned_to is not None and (
+        assignee is None
+        or not assignee.is_active
+        or not permission_allows(assigned_roles(db, assignee), "leads", "write")
+    ):
+        raise HTTPException(status_code=422, detail="Người phụ trách phải là tài khoản tư vấn đang hoạt động")
+    for lead in leads:
+        lead.assigned_to_user_id = assigned_to
+        lead.status = "assigned" if assigned_to else ("new" if lead.status == "assigned" else lead.status)
+        record_lead_interaction(
+            db,
+            lead,
+            user,
+            "assignment",
+            f"Phân công hàng loạt cho {assignee.full_name}" if assignee else "Gỡ phân công hàng loạt",
+        )
+    db.commit()
+    return {"assigned_count": len(leads)}
+
+
+@app.delete("/leads/{lead_id}")
+def delete_lead(
+    lead_id: int,
+    user: Annotated[User, Depends(require_permission("leads", "full"))],
+    db: DbSession,
+) -> dict[str, str]:
+    if "training_manager" not in assigned_roles(db, user):
+        raise HTTPException(status_code=403, detail="Chỉ Quản lý đào tạo được xóa lead")
+    lead = db.get(Lead, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lead")
+    db.execute(delete(LeadInteraction).where(LeadInteraction.lead_id == lead_id))
+    db.delete(lead)
+    db.commit()
+    return {"message": "Đã xóa lead"}
+
+
+@app.get("/leads/{lead_id}/interactions")
+def list_lead_interactions(
+    lead_id: int,
+    user: Annotated[User, Depends(require_permission("leads", "read"))],
+    db: DbSession,
+) -> list[dict[str, Any]]:
+    lead = db.get(Lead, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lead")
+    ensure_lead_access(db, user, lead)
+    interactions = db.scalars(
+        select(LeadInteraction)
+        .where(LeadInteraction.lead_id == lead_id)
+        .order_by(LeadInteraction.created_at.desc())
+    ).all()
+    return [{
+        "id": item.id,
+        "action": item.action,
+        "note": item.note,
+        "user_name": (
+            db.get(User, item.user_id).full_name
+            if item.user_id and db.get(User, item.user_id)
+            else "Biểu mẫu công khai"
+        ),
+        "created_at": item.created_at.isoformat(),
+    } for item in interactions]
+
+
+@app.post("/leads/{lead_id}/interactions", status_code=status.HTTP_201_CREATED)
+def create_lead_interaction(
+    lead_id: int,
+    user: Annotated[User, Depends(require_permission("leads", "write"))],
+    db: DbSession,
+    payload: dict[str, Any],
+) -> dict[str, str]:
+    lead = db.get(Lead, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Không tìm thấy lead")
+    ensure_lead_access(db, user, lead)
+    note = str(payload.get("note", "")).strip()
+    if not note or len(note) > 2000:
+        raise HTTPException(status_code=422, detail="Ghi chú lịch sử phải có từ 1 đến 2000 ký tự")
+    record_lead_interaction(db, lead, user, "note", note)
+    db.commit()
+    return {"message": "Đã lưu ghi chú trao đổi"}
 
 
 @app.post("/auth/login", response_model=LoginResponse)
@@ -1755,7 +1986,8 @@ def login(request: LoginRequest, db: DbSession) -> LoginResponse:
         )
     if not user.is_active:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN, detail="Tài khoản đã bị khóa"
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Tài khoản của bạn đã bị khóa, xin liên hệ với quản trị viên.",
         )
     user.failed_login_attempts = 0
     user.locked_until = None
@@ -2075,6 +2307,11 @@ def delete_user(
     db.execute(delete(UserRoleAssignment).where(UserRoleAssignment.user_id == user_id))
     db.execute(delete(UserClassAssignment).where(UserClassAssignment.user_id == user_id))
     db.execute(delete(PasswordResetToken).where(PasswordResetToken.user_id == user_id))
+    db.execute(
+        update(Lead)
+        .where(Lead.assigned_to_user_id == user_id)
+        .values(assigned_to_user_id=None)
+    )
     db.delete(user)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

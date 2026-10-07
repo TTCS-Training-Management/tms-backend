@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 sqlalchemy
+openpyxl
 python-dotenv
 pyodbc
 httpx2

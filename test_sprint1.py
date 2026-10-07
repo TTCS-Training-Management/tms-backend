@@ -241,6 +241,10 @@ class Sprint1ApiTests(unittest.TestCase):
             json={"email": "lock-unlock@example.test", "password": "LockUnlock123"},
         )
         self.assertEqual(rejected_login.status_code, 403)
+        self.assertEqual(
+            rejected_login.json()["detail"],
+            "Tài khoản của bạn đã bị khóa, xin liên hệ với quản trị viên.",
+        )
 
         unlocked = self.client.patch(
             f"/users/{staff_id}/status",
@@ -734,6 +738,18 @@ class Sprint1ApiTests(unittest.TestCase):
         self.assertEqual(preview.status_code, 200)
         self.assertEqual(preview.json()["valid"], 1)
         self.assertEqual(preview.json()["skipped"], 5)
+        self.assertEqual(
+            preview.json()["preview_rows"],
+            [{
+                "row_number": 2,
+                "full_name": "Import User",
+                "email": "imported@example.test",
+                "roles": ["student"],
+                "phone": "0901234567",
+                "assigned_classes": ["Class A"],
+            }],
+        )
+        self.assertNotIn("initial_password", preview.json()["preview_rows"][0])
         self.assertTrue(any("Dòng 3" in error for error in preview.json()["errors"]))
         self.assertTrue(any("Dòng 4" in error for error in preview.json()["errors"]))
         self.assertTrue(any("Dòng 5" in error for error in preview.json()["errors"]))
@@ -817,6 +833,169 @@ class Sprint1ApiTests(unittest.TestCase):
             headers=self.admin_headers,
         )
         self.assertEqual(internal_listing.json()[0]["source"], "facebook")
+
+    def test_lead_list_handles_deleted_or_missing_assignees(self):
+        with main.SessionLocal() as db:
+            deleted_user = main.User(
+                full_name="Deleted Lead Assignee",
+                email="deleted-lead-assignee@example.test",
+                password_hash=main.hash_password("Deleted123"),
+                role="guest",
+            )
+            db.add(deleted_user)
+            db.flush()
+            db.add(main.UserRoleAssignment(user_id=deleted_user.id, role="guest"))
+            db.add_all([
+                main.Lead(
+                    full_name="Lead Assigned Before Account Deletion",
+                    phone="0907777001",
+                    source="website",
+                    status="new",
+                    assigned_to_user_id=deleted_user.id,
+                ),
+                main.Lead(
+                    full_name="Lead With Historical Missing Assignee",
+                    phone="0907777002",
+                    source="website",
+                    status="new",
+                    assigned_to_user_id=999999,
+                ),
+            ])
+            db.commit()
+            deleted_user_id = deleted_user.id
+
+        deleted = self.client.delete(
+            f"/users/{deleted_user_id}",
+            headers=self.admin_headers,
+        )
+        self.assertEqual(deleted.status_code, 204, deleted.text)
+
+        for lead_name in (
+            "Lead Assigned Before Account Deletion",
+            "Lead With Historical Missing Assignee",
+        ):
+            response = self.client.get(
+                f"/leads?q={lead_name.replace(' ', '+')}",
+                headers=self.admin_headers,
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            lead = next(item for item in response.json() if item["full_name"] == lead_name)
+            self.assertIsNone(lead["assigned_to_user_id"])
+            self.assertIsNone(lead["assigned_to_name"])
+
+    def test_lead_crud_duplicate_bulk_assignment_history_and_date_filters(self):
+        manager_headers = self._headers_for_role("lead-manager@example.test", "training_manager")
+        counselor_headers = self._headers_for_role("lead-counselor@example.test", "admissions")
+        self.assertEqual(
+            self.client.get("/auth/me", headers=counselor_headers).json()["permissions"]["leads"],
+            "W",
+        )
+        self.assertEqual(
+            self.client.get("/auth/me", headers=manager_headers).json()["permissions"]["leads"],
+            "F",
+        )
+
+        first = self.client.post(
+            "/leads",
+            headers=self.admin_headers,
+            json={
+                "full_name": "Bulk Lead One",
+                "phone": "0903333001",
+                "email": "bulk-one@example.test",
+                "source": "website",
+                "program_interest": "TMS",
+            },
+        )
+        second = self.client.post(
+            "/leads",
+            headers=self.admin_headers,
+            json={
+                "full_name": "Bulk Lead Two",
+                "phone": "0903333002",
+                "source": "facebook",
+            },
+        )
+        self.assertEqual(first.status_code, 201, first.text)
+        self.assertEqual(second.status_code, 201, second.text)
+        first_id, second_id = first.json()["id"], second.json()["id"]
+
+        duplicate_check = self.client.get(
+            "/leads/duplicate-check",
+            headers=counselor_headers,
+            params={"phone": "+84903333001"},
+        )
+        self.assertEqual(duplicate_check.status_code, 200, duplicate_check.text)
+        self.assertTrue(duplicate_check.json()["duplicate"])
+        duplicate_create = self.client.post(
+            "/leads",
+            headers=counselor_headers,
+            json={"full_name": "Different Person", "phone": "0903333001"},
+        )
+        self.assertEqual(duplicate_create.status_code, 409)
+
+        bulk = self.client.post(
+            "/leads/assign-bulk",
+            headers=manager_headers,
+            json={"lead_ids": [first_id, second_id], "assigned_to_user_id": self._user_id(counselor_headers)},
+        )
+        self.assertEqual(bulk.status_code, 200, bulk.text)
+        self.assertEqual(bulk.json()["assigned_count"], 2)
+        counselor_leads = self.client.get("/leads", headers=counselor_headers)
+        self.assertEqual({item["id"] for item in counselor_leads.json()}, {first_id, second_id})
+        self.assertEqual(self.client.get(f"/leads/{first_id}/interactions", headers=counselor_headers).status_code, 200)
+
+        edited = self.client.patch(
+            f"/leads/{first_id}",
+            headers=counselor_headers,
+            json={"full_name": "Bulk Lead One Updated", "phone": "0903333001", "email": "updated@example.test"},
+        )
+        self.assertEqual(edited.status_code, 200, edited.text)
+        duplicate_edit = self.client.patch(
+            f"/leads/{first_id}",
+            headers=counselor_headers,
+            json={"phone": "0903333002"},
+        )
+        self.assertEqual(duplicate_edit.status_code, 409)
+        note = self.client.post(
+            f"/leads/{first_id}/interactions",
+            headers=counselor_headers,
+            json={"note": "Đã gọi và hẹn tư vấn ngày mai"},
+        )
+        self.assertEqual(note.status_code, 201, note.text)
+        history = self.client.get(f"/leads/{first_id}/interactions", headers=counselor_headers)
+        self.assertTrue(any("hẹn tư vấn ngày mai" in item["note"] for item in history.json()))
+        self.assertTrue(any(item["action"] == "assignment" for item in history.json()))
+        self.assertEqual(self.client.delete(f"/leads/{first_id}", headers=counselor_headers).status_code, 403)
+
+        today = datetime.now(timezone.utc).date().isoformat()
+        dated = self.client.get(f"/leads?from_date={today}&to_date={today}", headers=manager_headers)
+        self.assertGreaterEqual(len(dated.json()), 2)
+        invalid_range = self.client.get(
+            "/leads?from_date=2026-10-10&to_date=2026-10-01",
+            headers=manager_headers,
+        )
+        self.assertEqual(invalid_range.status_code, 422)
+        self.assertEqual(self.client.delete(f"/leads/{first_id}", headers=self.admin_headers).status_code, 403)
+        self.assertEqual(self.client.delete(f"/leads/{first_id}", headers=manager_headers).status_code, 200)
+        self.assertEqual(self.client.get(f"/leads/{first_id}/interactions", headers=manager_headers).status_code, 404)
+
+    def _headers_for_role(self, email, role):
+        with main.SessionLocal() as db:
+            user = main.User(
+                full_name=email.split("@")[0],
+                email=email,
+                password_hash=main.hash_password("LeadTest123"),
+                role=role,
+            )
+            db.add(user)
+            db.flush()
+            db.add(main.UserRoleAssignment(user_id=user.id, role=role))
+            db.commit()
+            token = main.encode_token(user)
+        return {"Authorization": f"Bearer {token}"}
+
+    def _user_id(self, headers):
+        return self.client.get("/auth/me", headers=headers).json()["id"]
 
     def _create_training_program(self, suffix):
         response = self.client.post(
