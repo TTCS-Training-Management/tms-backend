@@ -267,7 +267,9 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+from app.api.leads import router as lead_router
 
+app.include_router(lead_router)
 
 @app.get("/")
 def read_root() -> dict[str, str]:
