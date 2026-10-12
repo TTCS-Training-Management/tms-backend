@@ -742,6 +742,7 @@ async function loadClasses() {
     }
 }
 
+
 function renderClasses(classes) {
     const tableBody = document.getElementById("classTableBody");
     if (!tableBody) return;
@@ -756,8 +757,9 @@ function renderClasses(classes) {
     }
 
     tableBody.innerHTML = classes.map(item => {
-        const classCode = item.class_code || "";
+        const classCode = String(item.class_code || "");
         const status = item.status || "Chuẩn bị";
+
         const transitions = {
             "Chuẩn bị": ["Đang học", "Huỷ"],
             "Đang học": ["Kết thúc", "Huỷ"],
@@ -765,29 +767,48 @@ function renderClasses(classes) {
             "Huỷ": []
         };
 
-        const options = (transitions[status] || [])
-            .map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
+        // Hiển thị cả trạng thái hiện tại và trạng thái có thể chuyển đến.
+        const availableStatuses = [
+            status,
+            ...(transitions[status] || [])
+        ];
+
+        const options = [...new Set(availableStatuses)]
+            .map(value => `
+                <option
+                    value="${escapeHtml(value)}"
+                    ${value === status ? "selected" : ""}
+                >
+                    ${escapeHtml(value)}
+                </option>
+            `)
             .join("");
 
-        const statusControl = options
-            ? `<select id="status-${escapeHtml(classCode)}">${options}</select>
-               <button class="btn btn-secondary btn-small"
-                       onclick="updateClassStatus('${escapeHtml(classCode)}')">
-                   Cập nhật
-               </button>`
+        const statusControl = (transitions[status] || []).length > 0
+            ? `
+                <select id="status-${escapeHtml(classCode)}">
+                    ${options}
+                </select>
+                <button
+                    class="btn btn-secondary btn-small"
+                    onclick="updateClassStatus('${escapeHtml(classCode)}')">
+                    Cập nhật
+                </button>
+            `
             : escapeHtml(status);
 
         return `
             <tr>
                 <td><strong>${escapeHtml(classCode)}</strong></td>
-                <td>${escapeHtml(item.program_name || item.program_id || "")}</td>
-                <td>${escapeHtml(item.opening_date || "")}</td>
+                <td>${escapeHtml(String(item.program_name || item.program_id || ""))}</td>
+                <td>${escapeHtml(String(item.opening_date || ""))}</td>
                 <td>${escapeHtml(String(item.max_students ?? ""))}</td>
-                <td>${escapeHtml(item.learning_mode || "")}</td>
+                <td>${escapeHtml(String(item.learning_mode || ""))}</td>
                 <td>${statusControl}</td>
                 <td>
-                    <button class="btn btn-primary btn-small"
-                            onclick="viewClass('${escapeHtml(classCode)}')">
+                    <button
+                        class="btn btn-primary btn-small"
+                        onclick="viewClass('${escapeHtml(classCode)}')">
                         Chi tiết
                     </button>
                 </td>
@@ -795,6 +816,7 @@ function renderClasses(classes) {
         `;
     }).join("");
 }
+
 
 async function updateClassStatus(classCode) {
     const select = document.getElementById(`status-${classCode}`);
