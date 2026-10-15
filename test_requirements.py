@@ -1,10 +1,14 @@
 import sys
 import unittest
 from datetime import datetime, timedelta
-from werkzeug.security import check_password_hash
+try:
+    from werkzeug.security import check_password_hash
+    from app import app, db, User, PasswordResetToken, hash_token
+    HAS_WERKZEUG = True
+except ImportError:
+    HAS_WERKZEUG = False
 
-from app import app, db, User, PasswordResetToken, hash_token
-
+@unittest.skipUnless(HAS_WERKZEUG, "Requires Flask and werkzeug")
 class TestPasswordResetFlow(unittest.TestCase):
     def setUp(self):
         self.app = app
