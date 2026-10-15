@@ -3,7 +3,6 @@ import hashlib
 import hmac
 import json
 import os
-import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
@@ -14,8 +13,8 @@ from fastapi.testclient import TestClient
 from openpyxl import Workbook, load_workbook
 from sqlalchemy import select
 
-_test_database = tempfile.TemporaryDirectory(prefix="tms-sprint1-")
-_database_path = Path(_test_database.name) / "sprint1.db"
+_database_path = Path(__file__).resolve().parent / ".sprint1-tests.sqlite"
+_database_path.unlink(missing_ok=True)
 os.environ["DATABASE_URL"] = f"sqlite:///{_database_path.as_posix()}"
 
 import main
@@ -36,7 +35,7 @@ class Sprint1ApiTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.client.__exit__(None, None, None)
         main.engine.dispose()
-        _test_database.cleanup()
+        _database_path.unlink(missing_ok=True)
 
     def test_permission_matrix_defaults_to_deny(self):
         roles = self.client.get("/auth/roles", headers=self.admin_headers)
@@ -80,7 +79,17 @@ class Sprint1ApiTests(unittest.TestCase):
         self.assertTrue(account["must_change_password"])
         self.assertTrue(account["handover_required"])
         self.assertEqual(activation_messages[0]["To"], "nguyen.an@example.test")
-        self.assertIn("mật khẩu tạm thời", activation_messages[0].get_content())
+        self.assertEqual(
+            activation_messages[0]["Subject"],
+            "Thông tin tài khoản của bạn | TMS",
+        )
+        self.assertIn("Hệ thống Quản lý Đào tạo TMS", str(activation_messages[0]["From"]))
+        activation_text = activation_messages[0].get_body(preferencelist=("plain",))
+        self.assertIsNotNone(activation_text)
+        self.assertIn("mật khẩu tạm thời", activation_text.get_content())
+        activation_html = activation_messages[0].get_body(preferencelist=("html",))
+        self.assertIsNotNone(activation_html)
+        self.assertIn("Đăng nhập hệ thống", activation_html.get_content())
 
         response = self.client.get(
             "/users?q=0901234567&role=ta&page=1&page_size=20",
@@ -455,7 +464,22 @@ class Sprint1ApiTests(unittest.TestCase):
                 json={"email": "nobody@example.test"},
             )
         self.assertEqual(known.json(), unknown.json())
-        self.assertIn("?reset_token=one-time-reset", messages[0].get_content())
+        self.assertIn("liên kết sẽ được gửi", known.json()["message"])
+        self.assertIn("30 phút", known.json()["message"])
+        self.assertIn("dùng một lần", known.json()["message"])
+        self.assertIn(
+            "?reset_token=one-time-reset&account=reset%40example.test",
+            messages[0].get_body(preferencelist=("plain",)).get_content(),
+        )
+        self.assertEqual(
+            messages[0]["Subject"],
+            "Yêu cầu đặt lại mật khẩu | TMS",
+        )
+        self.assertIn("Hệ thống Quản lý Đào tạo TMS", str(messages[0]["From"]))
+        reset_html = messages[0].get_body(preferencelist=("html",))
+        self.assertIsNotNone(reset_html)
+        self.assertIn("Liên kết sẽ hết hạn sau", reset_html.get_content())
+        self.assertIn("Đặt lại mật khẩu", reset_html.get_content())
         with main.SessionLocal() as db:
             reset_record = db.scalar(
                 select(main.PasswordResetToken).where(
@@ -464,6 +488,12 @@ class Sprint1ApiTests(unittest.TestCase):
                 )
             )
             self.assertIsNotNone(reset_record)
+        valid_link = self.client.get(
+            "/auth/reset-password/validate",
+            params={"token": "one-time-reset"},
+        )
+        self.assertEqual(valid_link.status_code, 200)
+        self.assertEqual(valid_link.json()["email"], "reset@example.test")
 
         response = self.client.post(
             "/auth/reset-password",
@@ -484,6 +514,11 @@ class Sprint1ApiTests(unittest.TestCase):
             json={"token": "one-time-reset", "new_password": "AnotherPass123"},
         )
         self.assertEqual(reused.status_code, 400)
+        reused_link = self.client.get(
+            "/auth/reset-password/validate",
+            params={"token": "one-time-reset"},
+        )
+        self.assertEqual(reused_link.status_code, 400)
 
     def test_change_password_validates_current_password_and_revokes_old_sessions(self):
         with main.SessionLocal() as db:
@@ -571,6 +606,11 @@ class Sprint1ApiTests(unittest.TestCase):
             json={"token": "expired-reset", "new_password": "NewPassword123"},
         )
         self.assertEqual(response.status_code, 400)
+        expired_link = self.client.get(
+            "/auth/reset-password/validate",
+            params={"token": "expired-reset"},
+        )
+        self.assertEqual(expired_link.status_code, 400)
 
     def test_idle_and_absolute_session_expiry(self):
         now = int(datetime.now(timezone.utc).timestamp())
@@ -655,6 +695,50 @@ class Sprint1ApiTests(unittest.TestCase):
             )
             self.assertEqual(account.failed_login_attempts, 5)
 
+    def test_successful_login_resets_consecutive_failed_attempts(self):
+        email = "reset-failed-attempts@example.test"
+        password = "CorrectPass123"
+        with main.SessionLocal() as db:
+            user = main.User(
+                full_name="Failed Attempt Reset User",
+                email=email,
+                password_hash=main.hash_password(password),
+                role="student",
+            )
+            db.add(user)
+            db.flush()
+            user_id = user.id
+            db.add(main.UserRoleAssignment(user_id=user_id, role="student"))
+            db.commit()
+
+        for _ in range(4):
+            failed = self.client.post(
+                "/auth/login",
+                json={"email": email, "password": "WrongPassword1"},
+            )
+            self.assertEqual(failed.status_code, 401)
+
+        succeeded = self.client.post(
+            "/auth/login",
+            json={"email": email, "password": password},
+        )
+        self.assertEqual(succeeded.status_code, 200, succeeded.text)
+        with main.SessionLocal() as db:
+            db.expire_all()
+            user = db.get(main.User, user_id)
+            self.assertEqual(user.failed_login_attempts, 0)
+            self.assertIsNone(user.locked_until)
+
+        failed_again = self.client.post(
+            "/auth/login",
+            json={"email": email, "password": "WrongPassword1"},
+        )
+        self.assertEqual(failed_again.status_code, 401)
+        with main.SessionLocal() as db:
+            db.expire_all()
+            user = db.get(main.User, user_id)
+            self.assertEqual(user.failed_login_attempts, 1)
+
     def test_login_does_not_reveal_whether_email_exists(self):
         known = self.client.post(
             "/auth/login",
@@ -666,6 +750,46 @@ class Sprint1ApiTests(unittest.TestCase):
         )
         self.assertEqual(known.status_code, 401)
         self.assertEqual(known.json()["detail"], unknown.json()["detail"])
+
+    def test_unknown_and_registered_emails_lock_after_five_failed_logins(self):
+        registered_email = "registered-lock-check@example.test"
+        unknown_email = "unknown-lock-check@example.test"
+        with main.SessionLocal() as db:
+            user = main.User(
+                full_name="Lock Check User",
+                email=registered_email,
+                password_hash=main.hash_password("CorrectPassword123"),
+                role="student",
+            )
+            db.add(user)
+            db.commit()
+
+        statuses_by_email = {}
+        for email in (registered_email, unknown_email):
+            statuses = []
+            for _ in range(5):
+                response = self.client.post(
+                    "/auth/login",
+                    json={"email": email, "password": "WrongPassword123"},
+                )
+                statuses.append(response.status_code)
+            statuses_by_email[email] = statuses
+            self.assertEqual(response.headers["retry-after"], "900")
+
+            blocked_retry = self.client.post(
+                "/auth/login",
+                json={"email": email, "password": "WrongPassword123"},
+            )
+            self.assertEqual(blocked_retry.status_code, 423)
+            self.assertGreater(int(blocked_retry.headers["retry-after"]), 0)
+
+        self.assertEqual(statuses_by_email[registered_email], [401, 401, 401, 401, 423])
+        self.assertEqual(statuses_by_email[unknown_email], [401, 401, 401, 401, 423])
+        with main.SessionLocal() as db:
+            attempt = db.get(main.LoginAttempt, unknown_email)
+            self.assertIsNotNone(attempt)
+            self.assertEqual(attempt.failed_attempts, 5)
+            self.assertIsNotNone(attempt.locked_until)
 
     def test_profile_update_avatar_upload_and_serving(self):
         profile = self.client.patch(
@@ -689,14 +813,40 @@ class Sprint1ApiTests(unittest.TestCase):
         self.assertEqual(cleared.status_code, 200)
         self.assertIsNone(cleared.json()["date_of_birth"])
 
-        with tempfile.TemporaryDirectory(prefix="tms-avatar-test-") as directory:
-            with patch.object(main, "UPLOADS_DIR", Path(directory)):
-                uploaded = self.client.post(
-                    "/profile/avatar",
-                    headers=self.admin_headers,
-                    files={"file": ("avatar.png", b"test-image", "image/png")},
-                )
-                self.assertTrue((Path(directory) / "avatar_1.png").exists())
+        uploaded_paths: list[Path] = []
+        try:
+            uploaded = self.client.post(
+                "/profile/avatar",
+                headers=self.admin_headers,
+                files={"file": ("avatar.png", b"first-image", "image/png")},
+            )
+            first_avatar_url = uploaded.json()["avatar_url"]
+            first_avatar_path = main.UPLOADS_DIR / Path(first_avatar_url).name
+            uploaded_paths.append(first_avatar_path)
+            self.assertEqual(first_avatar_path.read_bytes(), b"first-image")
+            self.assertEqual(self.client.get(first_avatar_url).content, b"first-image")
+
+            replaced = self.client.post(
+                "/profile/avatar",
+                headers=self.admin_headers,
+                files={"file": ("avatar.png", b"replacement-image", "image/png")},
+            )
+            replacement_url = replaced.json()["avatar_url"]
+            uploaded_paths.append(main.UPLOADS_DIR / Path(replacement_url).name)
+            self.assertEqual(replaced.status_code, 200)
+            self.assertNotEqual(replacement_url, first_avatar_url)
+            self.assertFalse(first_avatar_path.exists())
+            self.assertEqual(
+                self.client.get(replacement_url).content,
+                b"replacement-image",
+            )
+            self.assertEqual(
+                self.client.get("/profile", headers=self.admin_headers).json()["avatar_url"],
+                replacement_url,
+            )
+        finally:
+            for path in uploaded_paths:
+                path.unlink(missing_ok=True)
         self.assertEqual(uploaded.status_code, 200)
 
     def test_user_import_template_and_row_summary(self):
@@ -721,6 +871,8 @@ class Sprint1ApiTests(unittest.TestCase):
         sheet.append(["Duplicate User", "imported@example.test", "student", "", "", "Temporary123!"])
         sheet.append(["Invalid Role", "invalid-role@example.test", "student,unknown-role", "", "", "Temporary123!"])
         sheet.append(["Weak Password", "weak-password@example.test", "student", "", "", "weak"])
+        for index in range(24):
+            sheet.append([f"Import User {index + 2}", f"imported-{index + 2}@example.test", "student", "", "", "Temporary123!"])
         content = BytesIO()
         workbook.save(content)
         with patch.object(main, "smtp_configured", return_value=False):
@@ -736,20 +888,21 @@ class Sprint1ApiTests(unittest.TestCase):
                 },
             )
         self.assertEqual(preview.status_code, 200)
-        self.assertEqual(preview.json()["valid"], 1)
+        self.assertEqual(preview.json()["valid"], 25)
         self.assertEqual(preview.json()["skipped"], 5)
+        self.assertEqual(len(preview.json()["preview_rows"]), 25)
         self.assertEqual(
-            preview.json()["preview_rows"],
-            [{
+            preview.json()["preview_rows"][0],
+            {
                 "row_number": 2,
                 "full_name": "Import User",
                 "email": "imported@example.test",
                 "roles": ["student"],
                 "phone": "0901234567",
                 "assigned_classes": ["Class A"],
-            }],
+            },
         )
-        self.assertNotIn("initial_password", preview.json()["preview_rows"][0])
+        self.assertTrue(all("initial_password" not in row for row in preview.json()["preview_rows"]))
         self.assertTrue(any("Dòng 3" in error for error in preview.json()["errors"]))
         self.assertTrue(any("Dòng 4" in error for error in preview.json()["errors"]))
         self.assertTrue(any("Dòng 5" in error for error in preview.json()["errors"]))
@@ -768,7 +921,7 @@ class Sprint1ApiTests(unittest.TestCase):
                 },
             )
         self.assertEqual(imported.status_code, 200)
-        self.assertEqual(imported.json()["imported"], 1)
+        self.assertEqual(imported.json()["imported"], 25)
         self.assertEqual(imported.json()["skipped"], 5)
         self.assertIn("Dòng 3", imported.json()["errors"][0])
         self.assertEqual(
@@ -801,6 +954,15 @@ class Sprint1ApiTests(unittest.TestCase):
         )
         self.assertEqual(leads.status_code, 200)
         lead_id = leads.json()[0]["id"]
+        paginated = self.client.get(
+            "/leads?q=Sprint+Lead&status=new&page=1&page_size=1",
+            headers=self.admin_headers,
+        )
+        self.assertEqual(paginated.status_code, 200, paginated.text)
+        self.assertEqual(paginated.json()["total"], 1)
+        self.assertEqual(paginated.json()["page"], 1)
+        self.assertEqual(paginated.json()["page_size"], 1)
+        self.assertEqual(paginated.json()["items"][0]["id"], lead_id)
         assigned = self.client.post(
             f"/leads/{lead_id}/assign",
             headers=self.admin_headers,
@@ -965,6 +1127,9 @@ class Sprint1ApiTests(unittest.TestCase):
         history = self.client.get(f"/leads/{first_id}/interactions", headers=counselor_headers)
         self.assertTrue(any("hẹn tư vấn ngày mai" in item["note"] for item in history.json()))
         self.assertTrue(any(item["action"] == "assignment" for item in history.json()))
+        history_timestamp = next(item["created_at"] for item in history.json() if item["note"] == "Đã gọi và hẹn tư vấn ngày mai")
+        self.assertTrue(history_timestamp.endswith("Z"))
+        self.assertEqual(datetime.fromisoformat(history_timestamp).utcoffset(), timedelta(0))
         self.assertEqual(self.client.delete(f"/leads/{first_id}", headers=counselor_headers).status_code, 403)
 
         today = datetime.now(timezone.utc).date().isoformat()
@@ -1072,6 +1237,50 @@ class Sprint1ApiTests(unittest.TestCase):
             ).status_code,
             404,
         )
+
+    def test_training_catalog_search_and_pagination_preserve_legacy_lists(self):
+        for suffix in ("PAGE-A", "PAGE-B"):
+            program = self.client.post(
+                "/training/programs",
+                headers=self.admin_headers,
+                json={"code": f"CAT-{suffix}", "name": f"Catalog Program {suffix}"},
+            )
+            self.assertEqual(program.status_code, 200, program.text)
+            subject = self.client.post(
+                "/training/subjects",
+                headers=self.admin_headers,
+                json={"code": f"CAT-{suffix}", "name": f"Catalog Subject {suffix}"},
+            )
+            self.assertEqual(subject.status_code, 200, subject.text)
+
+        program_page = self.client.get(
+            "/training/programs?q=Catalog+Program&page=1&page_size=1",
+            headers=self.admin_headers,
+        )
+        self.assertEqual(program_page.status_code, 200, program_page.text)
+        self.assertEqual(program_page.json()["total"], 2)
+        self.assertEqual(len(program_page.json()["items"]), 1)
+        self.assertEqual(program_page.json()["page"], 1)
+
+        subject_page = self.client.get(
+            "/training/subjects?q=Catalog+Subject&page=2&page_size=1",
+            headers=self.admin_headers,
+        )
+        self.assertEqual(subject_page.status_code, 200, subject_page.text)
+        self.assertEqual(subject_page.json()["total"], 2)
+        self.assertEqual(len(subject_page.json()["items"]), 1)
+        self.assertEqual(subject_page.json()["page"], 2)
+
+        legacy_programs = self.client.get(
+            "/training/programs",
+            headers=self.admin_headers,
+        )
+        legacy_subjects = self.client.get(
+            "/training/subjects",
+            headers=self.admin_headers,
+        )
+        self.assertIsInstance(legacy_programs.json(), list)
+        self.assertIsInstance(legacy_subjects.json(), list)
 
     def test_curriculum_rejects_duplicates_and_foreign_prerequisites_and_persists_order(self):
         program_id = self._create_training_program("ORDER")

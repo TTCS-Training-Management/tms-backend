@@ -12,6 +12,8 @@ import smtplib
 from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 from email.message import EmailMessage
+from email.utils import formataddr, parseaddr
+from html import escape
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from urllib.parse import quote
@@ -110,7 +112,7 @@ ROLE_PERMISSIONS: dict[str, dict[str, str]] = {
         "courses": "R",
         "student_records": "W",
         "classes": "R",
-        "attendance": "R",
+        "attendance": "W",
         "materials": "R",
         "assignments": "W",
         "grades": "R",
@@ -219,6 +221,14 @@ class User(Base):
     must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class LoginAttempt(Base):
+    __tablename__ = "login_attempts"
+
+    email: Mapped[str] = mapped_column(String(255), primary_key=True)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class UserRoleAssignment(Base):
     __tablename__ = "user_roles"
 
@@ -316,6 +326,8 @@ class Lead(Base):
     status: Mapped[str] = mapped_column(String(30), default="new")
     program_interest: Mapped[str | None] = mapped_column(String(200), nullable=True)
     notes: Mapped[str | None] = mapped_column(String(4000), nullable=True)
+    loss_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    converted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     assigned_to_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
@@ -329,6 +341,8 @@ class LeadInteraction(Base):
     user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
     action: Mapped[str] = mapped_column(String(40))
     note: Mapped[str] = mapped_column(String(2000))
+    interaction_type: Mapped[str] = mapped_column(String(20), default="message")
+    follow_up_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
@@ -701,6 +715,30 @@ def seed_database() -> None:
         for column, definition in migrations.items():
             if column not in existing_columns:
                 connection.execute(text(f"ALTER TABLE users ADD COLUMN {column} {definition}"))
+        for table, additions in {
+            "leads": {
+                "loss_reason": "VARCHAR(1000) NULL",
+                "converted_at": "DATETIME NULL",
+            },
+            "lead_interactions": {
+                "interaction_type": "VARCHAR(20) NOT NULL DEFAULT 'message'",
+                "follow_up_at": "DATETIME NULL",
+            },
+        }.items():
+            columns = {column["name"] for column in inspect(engine).get_columns(table)}
+            for column, definition in additions.items():
+                if column not in columns:
+                    connection.execute(
+                        text(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+                    )
+        if engine.dialect.name == "sqlite":
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_leads_status ON leads(status)"
+            )
+            connection.exec_driver_sql(
+                "CREATE INDEX IF NOT EXISTS ix_lead_interactions_follow_up_at "
+                "ON lead_interactions(follow_up_at)"
+            )
         connection.execute(
             text(
                 "UPDATE leads SET assigned_to_user_id = NULL "
@@ -750,35 +788,144 @@ def send_email(message: EmailMessage) -> bool:
     return True
 
 
-def reset_email(email: str, token: str) -> EmailMessage:
-    reset_url = f"{FRONTEND_URL.rstrip('/')}/?reset_token={quote(token)}"
+def branded_email(
+    *,
+    recipient: str,
+    subject: str,
+    preheader: str,
+    heading: str,
+    greeting: str,
+    body_html: str,
+    action_label: str,
+    action_url: str,
+    security_note: str,
+    text_body: str,
+) -> EmailMessage:
+    sender_address = parseaddr(SMTP_FROM)[1] or SMTP_FROM or "tms-local@localhost"
     message = EmailMessage()
-    message["Subject"] = "Khôi phục mật khẩu TMS"
-    message["From"] = SMTP_FROM or "tms-local@localhost"
-    message["To"] = email
-    message.set_content(
-        "Bạn vừa yêu cầu đặt lại mật khẩu TMS.\n"
-        f"Mở liên kết sau trong vòng 30 phút: {reset_url}\n"
-        "Liên kết chỉ sử dụng được một lần. Nếu không phải bạn, hãy bỏ qua email này."
+    message["Subject"] = subject
+    message["From"] = formataddr(("Hệ thống Quản lý Đào tạo TMS", sender_address))
+    message["To"] = recipient
+    message.set_content(text_body)
+    message.add_alternative(
+        f"""\
+<!doctype html>
+<html lang="vi">
+  <body style="margin:0;padding:0;background:#f3f6fb;font-family:Arial,Helvetica,sans-serif;color:#203047;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;">{escape(preheader)}</div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f3f6fb;padding:32px 12px;">
+      <tr><td align="center">
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #e3eaf2;border-radius:12px;overflow:hidden;">
+          <tr><td style="background:#1769e0;padding:22px 32px;color:#ffffff;">
+            <div style="font-size:12px;letter-spacing:1.2px;text-transform:uppercase;opacity:.9;">TMS · ĐÀO TẠO</div>
+            <div style="font-size:21px;font-weight:700;margin-top:7px;">Hệ thống Quản lý Đào tạo</div>
+          </td></tr>
+          <tr><td style="padding:32px;">
+            <h1 style="font-size:23px;line-height:1.3;margin:0 0 20px;color:#152b45;">{escape(heading)}</h1>
+            <p style="font-size:15px;line-height:1.65;margin:0 0 14px;">{escape(greeting)}</p>
+            {body_html}
+            <p style="margin:26px 0 22px;text-align:center;">
+              <a href="{escape(action_url, quote=True)}" style="display:inline-block;background:#1769e0;color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;padding:13px 22px;border-radius:7px;">{escape(action_label)}</a>
+            </p>
+            <p style="font-size:13px;line-height:1.6;color:#53677e;margin:0 0 10px;">{escape(security_note)}</p>
+            <p style="font-size:12px;line-height:1.6;color:#738399;margin:18px 0 0;">Nếu nút không hoạt động, sao chép đường dẫn này vào trình duyệt:<br><a href="{escape(action_url, quote=True)}" style="color:#1769e0;word-break:break-all;">{escape(action_url)}</a></p>
+          </td></tr>
+          <tr><td style="border-top:1px solid #e8edf4;padding:18px 32px;background:#f9fbfe;color:#718096;font-size:12px;line-height:1.6;">
+            Email tự động từ <strong>Hệ thống Quản lý Đào tạo TMS</strong>.<br>
+            Vui lòng không trả lời email này. Nếu cần hỗ trợ, liên hệ quản trị viên hệ thống.
+          </td></tr>
+        </table>
+      </td></tr>
+    </table>
+  </body>
+</html>
+""",
+        subtype="html",
     )
     return message
+
+
+def reset_email(email: str, token: str) -> EmailMessage:
+    reset_url = (
+        f"{FRONTEND_URL.rstrip('/')}/?reset_token={quote(token)}"
+        f"&account={quote(email)}"
+    )
+    return branded_email(
+        recipient=email,
+        subject="Yêu cầu đặt lại mật khẩu | TMS",
+        preheader="Liên kết đặt lại mật khẩu có hiệu lực trong 30 phút.",
+        heading="Đặt lại mật khẩu",
+        greeting="Xin chào,",
+        body_html=(
+            '<p style="font-size:15px;line-height:1.65;margin:0 0 14px;">'
+            "Chúng tôi nhận được yêu cầu đặt lại mật khẩu cho tài khoản:</p>"
+            f'<p style="font-size:15px;font-weight:700;color:#152b45;margin:0 0 14px;">{escape(email)}</p>'
+            '<p style="font-size:15px;line-height:1.65;margin:0;">'
+            "Nhấn nút bên dưới để tạo mật khẩu mới. Liên kết sẽ hết hạn sau <strong>30 phút</strong> "
+            "và chỉ sử dụng được <strong>một lần</strong>.</p>"
+        ),
+        action_label="Đặt lại mật khẩu",
+        action_url=reset_url,
+        security_note=(
+            "Nếu bạn không yêu cầu thay đổi mật khẩu, hãy bỏ qua email này. "
+            "Mật khẩu hiện tại của bạn sẽ không thay đổi."
+        ),
+        text_body=(
+            "HỆ THỐNG QUẢN LÝ ĐÀO TẠO TMS\n"
+            "YÊU CẦU ĐẶT LẠI MẬT KHẨU\n\n"
+            "Xin chào,\n"
+            "Chúng tôi nhận được yêu cầu đặt lại mật khẩu cho tài khoản "
+            f"{email}.\n"
+            f"Mở liên kết sau trong vòng 30 phút: {reset_url}\n"
+            "Liên kết chỉ sử dụng được một lần.\n\n"
+            "Nếu bạn không yêu cầu thay đổi mật khẩu, hãy bỏ qua email này. "
+            "Mật khẩu hiện tại của bạn sẽ không thay đổi.\n\n"
+            "Email tự động từ Hệ thống Quản lý Đào tạo TMS. "
+            "Vui lòng không trả lời email này."
+        ),
+    )
 
 
 def activation_email(email: str, full_name: str, temporary_password: str) -> EmailMessage:
-    message = EmailMessage()
-    message["Subject"] = "Kích hoạt tài khoản TMS"
-    message["From"] = SMTP_FROM or "tms-local@localhost"
-    message["To"] = email
-    message.set_content(
-        f"Chào {full_name},\n\n"
-        "Tài khoản TMS của bạn đã được tạo.\n"
-        f"Địa chỉ đăng nhập: {email}\n"
-        f"Trang đăng nhập: {FRONTEND_URL.rstrip('/')}\n"
-        f"Đây là mật khẩu tạm thời: {temporary_password}\n\n"
-        "Vì lý do bảo mật, hệ thống sẽ yêu cầu bạn đổi mật khẩu sau lần đăng nhập đầu tiên.\n"
-        "Nếu bạn không yêu cầu tạo tài khoản này, vui lòng liên hệ quản trị viên."
+    login_url = FRONTEND_URL.rstrip("/")
+    return branded_email(
+        recipient=email,
+        subject="Thông tin tài khoản của bạn | TMS",
+        preheader="Tài khoản TMS đã được tạo. Đăng nhập lần đầu bằng mật khẩu tạm thời.",
+        heading="Tài khoản của bạn đã sẵn sàng",
+        greeting=f"Xin chào {full_name},",
+        body_html=(
+            '<p style="font-size:15px;line-height:1.65;margin:0 0 14px;">'
+            "Tài khoản của bạn trên Hệ thống Quản lý Đào tạo đã được tạo.</p>"
+            '<table role="presentation" width="100%" cellspacing="0" cellpadding="0" '
+            'style="background:#f4f7fb;border:1px solid #e3eaf2;border-radius:8px;margin:18px 0;">'
+            f'<tr><td style="padding:12px 16px;font-size:14px;">Email đăng nhập: <strong>{escape(email)}</strong></td></tr>'
+            f'<tr><td style="padding:0 16px 14px;font-size:14px;">Mật khẩu tạm thời: <strong>{escape(temporary_password)}</strong></td></tr>'
+            "</table>"
+            '<p style="font-size:15px;line-height:1.65;margin:0;">'
+            "Vì lý do bảo mật, bạn sẽ được yêu cầu đổi mật khẩu ngay sau lần đăng nhập đầu tiên.</p>"
+        ),
+        action_label="Đăng nhập hệ thống",
+        action_url=login_url,
+        security_note=(
+            "Mật khẩu tạm thời được gửi riêng cho bạn. Không chia sẻ email này; "
+            "hãy đổi mật khẩu ngay sau khi đăng nhập."
+        ),
+        text_body=(
+            "HỆ THỐNG QUẢN LÝ ĐÀO TẠO TMS\n"
+            "TÀI KHOẢN CỦA BẠN ĐÃ ĐƯỢC TẠO\n\n"
+            f"Xin chào {full_name},\n\n"
+            "Tài khoản của bạn trên Hệ thống Quản lý Đào tạo đã được tạo.\n"
+            f"Email đăng nhập: {email}\n"
+            f"Mật khẩu tạm thời: {temporary_password}\n"
+            f"Trang đăng nhập: {login_url}\n\n"
+            "Bạn sẽ được yêu cầu đổi mật khẩu ngay sau lần đăng nhập đầu tiên. "
+            "Không chia sẻ mật khẩu tạm thời này.\n\n"
+            "Nếu bạn không yêu cầu tạo tài khoản này, vui lòng liên hệ quản trị viên.\n\n"
+            "Email tự động từ Hệ thống Quản lý Đào tạo TMS. "
+            "Vui lòng không trả lời email này."
+        ),
     )
-    return message
 
 
 app = FastAPI(title="TMS Training Management API", version="1.0.0", on_startup=[seed_database])
@@ -871,12 +1018,19 @@ async def upload_avatar(
     contents = await file.read()
     if len(contents) > 2 * 1024 * 1024:
         raise HTTPException(status_code=413, detail="Ảnh tối đa 2MB")
-    filename = f"avatar_{user.id}{suffix}"
+    previous_avatar_url = user.avatar_url
+    filename = f"avatar_{user.id}_{secrets.token_hex(8)}{suffix}"
     target = UPLOADS_DIR / filename
     target.write_bytes(contents)
     user.avatar_url = f"/uploads/avatars/{filename}"
     db.commit()
     db.refresh(user)
+    if previous_avatar_url and previous_avatar_url.startswith("/uploads/avatars/"):
+        previous_filename = Path(previous_avatar_url).name
+        if previous_filename.startswith(f"avatar_{user.id}_") or previous_filename.startswith(f"avatar_{user.id}."):
+            previous_target = UPLOADS_DIR / previous_filename
+            if previous_target != target:
+                previous_target.unlink(missing_ok=True)
     return {"avatar_url": user.avatar_url}
 
 
@@ -898,40 +1052,78 @@ def inspect_user_import(content: bytes, db: Session) -> tuple[list[dict[str, Any
         raise HTTPException(status_code=422, detail=f"Thiếu cột bắt buộc: {', '.join(missing)}")
     errors: list[str] = []
     valid_rows: list[dict[str, Any]] = []
+    all_rows: list[dict[str, Any]] = []
     seen_emails: set[str] = set()
     for idx, row in enumerate(rows[1:], start=2):
-        full_name = str(row[header_map["full_name"]] or "").strip() if "full_name" in header_map else ""
-        email = str(row[header_map["email"]] or "").strip() if "email" in header_map else ""
+        full_name = str(row[header_map["full_name"]] or "").strip() if "full_name" in header_map and row[header_map["full_name"]] is not None else ""
+        email = str(row[header_map["email"]] or "").strip() if "email" in header_map and row[header_map["email"]] is not None else ""
         roles_value = row[header_map["roles"]] if "roles" in header_map else ""
-        if not full_name or not email:
-            errors.append(f"Dòng {idx}: thiếu họ tên hoặc email")
-            continue
-        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
-            errors.append(f"Dòng {idx}: email không hợp lệ: {email}")
-            continue
-        normalized_email = email.lower()
-        if normalized_email in seen_emails or db.scalar(select(User).where(User.email == normalized_email)) is not None:
-            errors.append(f"Dòng {idx}: email đã tồn tại: {email}")
-            continue
+        phone = str(row[header_map["phone"]] or "") if "phone" in header_map and row[header_map["phone"]] is not None else None
+        class_value = str(row[header_map["assigned_classes"]] or "") if "assigned_classes" in header_map and row[header_map["assigned_classes"]] is not None else ""
+        assigned_classes = [item.strip() for item in class_value.replace(";", ",").split(",") if item.strip()]
+
         role_tokens = [token.strip() for token in str(roles_value).replace(";", ",").split(",") if token.strip()]
         if not role_tokens:
             role_tokens = ["student"]
         normalized_roles = [token.lower().strip() for token in role_tokens]
+
+        if not full_name or not email:
+            err_msg = "Thiếu họ tên hoặc email"
+            errors.append(f"Dòng {idx}: {err_msg}")
+            all_rows.append({
+                "row_number": idx, "full_name": full_name, "email": email,
+                "roles": normalized_roles, "phone": phone, "assigned_classes": assigned_classes,
+                "status": "error", "message": err_msg,
+            })
+            continue
+
+        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            err_msg = f"Email không hợp lệ ({email})"
+            errors.append(f"Dòng {idx}: email không hợp lệ: {email}")
+            all_rows.append({
+                "row_number": idx, "full_name": full_name, "email": email,
+                "roles": normalized_roles, "phone": phone, "assigned_classes": assigned_classes,
+                "status": "error", "message": err_msg,
+            })
+            continue
+
+        normalized_email = email.lower()
+        if normalized_email in seen_emails or db.scalar(select(User).where(User.email == normalized_email)) is not None:
+            err_msg = f"Email đã tồn tại ({email})"
+            errors.append(f"Dòng {idx}: email đã tồn tại: {email}")
+            all_rows.append({
+                "row_number": idx, "full_name": full_name, "email": email,
+                "roles": normalized_roles, "phone": phone, "assigned_classes": assigned_classes,
+                "status": "duplicate", "message": err_msg,
+            })
+            continue
+
         invalid_roles = [role for role in normalized_roles if role not in ROLE_CODES]
         if invalid_roles:
-            errors.append(f"Dòng {idx}: vai trò không hợp lệ")
+            err_msg = f"Vai trò không hợp lệ: {', '.join(invalid_roles)}"
+            errors.append(f"Dòng {idx}: {err_msg}")
+            all_rows.append({
+                "row_number": idx, "full_name": full_name, "email": email,
+                "roles": normalized_roles, "phone": phone, "assigned_classes": assigned_classes,
+                "status": "error", "message": err_msg,
+            })
             continue
-        phone = str(row[header_map["phone"]] or "") if "phone" in header_map and row[header_map["phone"]] is not None else None
+
         initial_password = str(row[header_map["initial_password"]] or "") if "initial_password" in header_map and row[header_map["initial_password"]] is not None else ""
         if not smtp_configured():
             try:
                 validate_password_strength(initial_password)
             except ValueError as error:
-                errors.append(f"Dòng {idx}: cần initial_password hợp lệ khi chưa cấu hình email: {error}")
+                err_msg = f"Cần mật khẩu khởi tạo hợp lệ: {error}"
+                errors.append(f"Dòng {idx}: {err_msg}")
+                all_rows.append({
+                    "row_number": idx, "full_name": full_name, "email": email,
+                    "roles": normalized_roles, "phone": phone, "assigned_classes": assigned_classes,
+                    "status": "error", "message": err_msg,
+                })
                 continue
-        class_value = str(row[header_map["assigned_classes"]] or "") if "assigned_classes" in header_map and row[header_map["assigned_classes"]] is not None else ""
-        assigned_classes = [item.strip() for item in class_value.replace(";", ",").split(",") if item.strip()]
-        valid_rows.append({
+
+        valid_row_item = {
             "row_number": idx,
             "full_name": full_name,
             "email": normalized_email,
@@ -939,9 +1131,20 @@ def inspect_user_import(content: bytes, db: Session) -> tuple[list[dict[str, Any
             "phone": phone,
             "initial_password": initial_password,
             "assigned_classes": assigned_classes,
+        }
+        valid_rows.append(valid_row_item)
+        all_rows.append({
+            "row_number": idx,
+            "full_name": full_name,
+            "email": normalized_email,
+            "roles": list(dict.fromkeys(normalized_roles)),
+            "phone": phone,
+            "assigned_classes": assigned_classes,
+            "status": "valid",
+            "message": "Hợp lệ",
         })
         seen_emails.add(normalized_email)
-    return valid_rows, errors
+    return valid_rows, errors, all_rows
 
 
 @app.post("/users/import-excel/preview")
@@ -952,16 +1155,21 @@ def preview_user_import(
 ) -> dict[str, Any]:
     if Path(file.filename or "").suffix.lower() != ".xlsx":
         raise HTTPException(status_code=400, detail="Chỉ chấp nhận tệp Excel .xlsx")
-    valid_rows, errors = inspect_user_import(file.file.read(), db)
+    valid_rows, errors, all_rows = inspect_user_import(file.file.read(), db)
+    duplicate_count = sum(1 for r in all_rows if r.get("status") == "duplicate")
+    error_count = sum(1 for r in all_rows if r.get("status") == "error")
     preview_rows = [
         {key: value for key, value in row.items() if key != "initial_password"}
-        for row in valid_rows[:20]
+        for row in valid_rows
     ]
     return {
         "valid": len(valid_rows),
         "skipped": len(errors),
+        "duplicates": duplicate_count,
+        "error_count": error_count,
         "errors": errors,
         "preview_rows": preview_rows,
+        "all_rows": all_rows,
     }
 
 
@@ -973,7 +1181,7 @@ def import_users_excel(
 ) -> dict[str, Any]:
     if Path(file.filename or "").suffix.lower() != ".xlsx":
         raise HTTPException(status_code=400, detail="Chỉ chấp nhận tệp Excel .xlsx")
-    valid_rows, errors = inspect_user_import(file.file.read(), db)
+    valid_rows, errors, _ = inspect_user_import(file.file.read(), db)
     imported = 0
     for row in valid_rows:
         temporary_password = row["initial_password"] or f"{secrets.token_urlsafe(10)}A1!"
@@ -1028,20 +1236,52 @@ def download_user_import_template(
 def list_programs(
     user: Annotated[User, Depends(require_permission("courses", "read"))],
     db: DbSession,
-) -> list[dict[str, Any]]:
-    programs = db.scalars(select(TrainingProgram).order_by(TrainingProgram.created_at.desc())).all()
-    return [
-        {
-            "id": program.id,
-            "code": program.code,
-            "name": program.name,
-            "description": program.description,
-            "total_duration_hours": program.total_duration_hours,
-            "standard_fee": program.standard_fee,
-            "status": program.status,
-        }
-        for program in programs
-    ]
+    q: str | None = None,
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> list[dict[str, Any]] | dict[str, Any]:
+    statement = select(TrainingProgram)
+    if q and q.strip():
+        search = f"%{q.strip()}%"
+        statement = statement.where(
+            TrainingProgram.code.ilike(search) | TrainingProgram.name.ilike(search)
+        )
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    ordered = statement.order_by(TrainingProgram.created_at.desc(), TrainingProgram.id.desc())
+    if page is None:
+        programs = db.scalars(ordered).all()
+        return [
+            {
+                "id": program.id,
+                "code": program.code,
+                "name": program.name,
+                "description": program.description,
+                "total_duration_hours": program.total_duration_hours,
+                "standard_fee": program.standard_fee,
+                "status": program.status,
+            }
+            for program in programs
+        ]
+    programs = db.scalars(
+        ordered.offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return {
+        "items": [
+            {
+                "id": program.id,
+                "code": program.code,
+                "name": program.name,
+                "description": program.description,
+                "total_duration_hours": program.total_duration_hours,
+                "standard_fee": program.standard_fee,
+                "status": program.status,
+            }
+            for program in programs
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @app.post("/training/programs")
@@ -1217,9 +1457,52 @@ def update_training_class(
 def list_subjects(
     user: Annotated[User, Depends(require_permission("courses", "read"))],
     db: DbSession,
-) -> list[dict[str, Any]]:
-    items = db.scalars(select(TrainingSubject).order_by(TrainingSubject.name)).all()
-    return [{"id": item.id, "code": item.code, "name": item.name, "session_count": item.session_count, "weight": item.weight, "description": item.description, "learning_outcomes": item.learning_outcomes} for item in items]
+    q: str | None = None,
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> list[dict[str, Any]] | dict[str, Any]:
+    statement = select(TrainingSubject)
+    if q and q.strip():
+        search = f"%{q.strip()}%"
+        statement = statement.where(
+            TrainingSubject.code.ilike(search) | TrainingSubject.name.ilike(search)
+        )
+    total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+    ordered = statement.order_by(TrainingSubject.name, TrainingSubject.id)
+    if page is None:
+        items = db.scalars(ordered).all()
+        return [
+            {
+                "id": item.id,
+                "code": item.code,
+                "name": item.name,
+                "session_count": item.session_count,
+                "weight": item.weight,
+                "description": item.description,
+                "learning_outcomes": item.learning_outcomes,
+            }
+            for item in items
+        ]
+    items = db.scalars(
+        ordered.offset((page - 1) * page_size).limit(page_size)
+    ).all()
+    return {
+        "items": [
+            {
+                "id": item.id,
+                "code": item.code,
+                "name": item.name,
+                "session_count": item.session_count,
+                "weight": item.weight,
+                "description": item.description,
+                "learning_outcomes": item.learning_outcomes,
+            }
+            for item in items
+        ],
+        "total": total,
+        "page": page,
+        "page_size": page_size,
+    }
 
 
 @app.post("/training/subjects")
@@ -1469,9 +1752,20 @@ def list_subject_sessions(
     user: Annotated[User, Depends(require_permission("courses", "read"))],
     db: DbSession,
 ) -> list[dict[str, Any]]:
-    if db.get(TrainingSubject, subject_id) is None:
+    subject = db.get(TrainingSubject, subject_id)
+    if subject is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy môn học")
     rows = db.scalars(select(SubjectSession).where(SubjectSession.subject_id == subject_id).order_by(SubjectSession.sequence.asc())).all()
+    if not rows and subject.session_count > 0:
+        for seq in range(1, subject.session_count + 1):
+            db.add(SubjectSession(
+                subject_id=subject.id,
+                sequence=seq,
+                title=f"Buổi {seq}: Bài học môn {subject.name}",
+                objectives=f"Nội dung và mục tiêu kiến thức của buổi {seq} môn {subject.name}."
+            ))
+        db.commit()
+        rows = db.scalars(select(SubjectSession).where(SubjectSession.subject_id == subject_id).order_by(SubjectSession.sequence.asc())).all()
     return [{"id": item.id, "sequence": item.sequence, "title": item.title, "objectives": item.objectives} for item in rows]
 
 
@@ -1556,7 +1850,9 @@ def clone_subject_sessions(
     return {"copied_count": len(source_sessions)}
 
 
-LEAD_STATUSES = {"new", "assigned", "contacted", "qualified", "converted", "lost"}
+LEAD_PIPELINE_STAGES = {"new", "contacted", "consulting", "trial", "won", "rejected"}
+LEGACY_LEAD_STATUSES = {"assigned", "qualified", "converted", "lost"}
+LEAD_STATUSES = LEAD_PIPELINE_STAGES | LEGACY_LEAD_STATUSES
 LEAD_SOURCES = {"website", "facebook", "walkin", "referral"}
 
 
@@ -1578,7 +1874,10 @@ def find_duplicate_lead(db: Session, phone: str, exclude_id: int | None = None) 
 
 
 def record_lead_interaction(
-    db: Session, lead: Lead, user: User | None, action: str, note: str
+    db: Session, lead: Lead, user: User | None, action: str, note: str,
+    interaction_type: str = "message",
+    follow_up_at: datetime | None = None,
+    created_at: datetime | None = None,
 ) -> None:
     db.add(
         LeadInteraction(
@@ -1586,6 +1885,9 @@ def record_lead_interaction(
             user_id=user.id if user else None,
             action=action,
             note=note[:2000],
+            interaction_type=interaction_type,
+            follow_up_at=follow_up_at,
+            created_at=created_at or datetime.now(timezone.utc),
         )
     )
 
@@ -1632,7 +1934,9 @@ def list_leads(
     assigned_to: int | None = None,
     from_date: date | None = None,
     to_date: date | None = None,
-) -> list[dict[str, Any]]:
+    page: int | None = Query(default=None, ge=1),
+    page_size: int = Query(default=20, ge=1, le=500),
+) -> list[dict[str, Any]] | dict[str, Any]:
     if status and status not in LEAD_STATUSES:
         raise HTTPException(status_code=422, detail="Trạng thái lead không hợp lệ")
     if source and source not in LEAD_SOURCES:
@@ -1655,7 +1959,11 @@ def list_leads(
         statement = statement.where(Lead.created_at < datetime.combine(to_date + timedelta(days=1), datetime.min.time()))
     if not permission_allows(assigned_roles(db, user), "leads", "full"):
         statement = statement.where(Lead.assigned_to_user_id == user.id)
-    leads = db.scalars(statement.order_by(Lead.created_at.desc())).all()
+    ordered_statement = statement.order_by(Lead.created_at.desc(), Lead.id.desc())
+    if page is not None:
+        total = db.scalar(select(func.count()).select_from(statement.subquery())) or 0
+        ordered_statement = ordered_statement.offset((page - 1) * page_size).limit(page_size)
+    leads = db.scalars(ordered_statement).all()
     result = []
     for item in leads:
         assigned_user = (
@@ -1676,6 +1984,8 @@ def list_leads(
             "assigned_to_name": assigned_user.full_name if assigned_user else None,
             "created_at": item.created_at.isoformat(),
         })
+    if page is not None:
+        return {"items": result, "total": total, "page": page, "page_size": page_size}
     return result
 
 
@@ -1778,7 +2088,9 @@ def update_lead(
     if lead is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy lead")
     ensure_lead_access(db, user, lead)
-    editable_fields = {"full_name", "phone", "email", "source", "program_interest", "notes", "status"}
+    if lead.converted_at is not None:
+        raise HTTPException(status_code=409, detail="Lead đã chuyển đổi và đã được khóa")
+    editable_fields = {"full_name", "phone", "email", "source", "program_interest", "notes", "status", "loss_reason"}
     if not payload or not set(payload).issubset(editable_fields):
         raise HTTPException(status_code=422, detail="Trường cập nhật lead không hợp lệ")
     changed: list[str] = []
@@ -1791,15 +2103,32 @@ def update_lead(
             if key in payload and getattr(lead, key) != value:
                 setattr(lead, key, value)
                 changed.append(key)
+    if "loss_reason" in payload:
+        reason = str(payload["loss_reason"] or "").strip()
+        if len(reason) > 1000:
+            raise HTTPException(status_code=422, detail="Lý do từ chối tối đa 1000 ký tự")
+        if lead.loss_reason != (reason or None):
+            lead.loss_reason = reason or None
+            changed.append("loss_reason")
     if "status" in payload:
         new_status = str(payload["status"])
-        if new_status not in LEAD_STATUSES:
-            raise HTTPException(status_code=422, detail="Trạng thái lead không hợp lệ")
+        if new_status not in LEAD_PIPELINE_STAGES:
+            raise HTTPException(status_code=422, detail="Trạng thái lead phải là new, contacted, consulting, trial, won hoặc rejected")
+        if new_status == "rejected" and not (
+            str(payload.get("loss_reason") or lead.loss_reason or "").strip()
+        ):
+            raise HTTPException(status_code=422, detail="Khi từ chối lead cần nhập lý do")
         if new_status != lead.status:
+            previous_status = lead.status
             lead.status = new_status
             changed.append("status")
-    if changed:
-        record_lead_interaction(db, lead, user, "updated", f"Đã cập nhật: {', '.join(changed)}")
+            record_lead_interaction(
+                db, lead, user, "status_transition",
+                f"Chuyển trạng thái: {previous_status} → {new_status}",
+            )
+    updated_fields = [field for field in changed if field != "status"]
+    if updated_fields:
+        record_lead_interaction(db, lead, user, "updated", f"Đã cập nhật: {', '.join(updated_fields)}")
     db.commit()
     db.refresh(lead)
     return {"id": lead.id, "status": lead.status, "assigned_to_user_id": lead.assigned_to_user_id}
@@ -1815,6 +2144,8 @@ def assign_lead(
     lead = db.get(Lead, lead_id)
     if lead is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy lead")
+    if lead.converted_at is not None:
+        raise HTTPException(status_code=409, detail="Lead đã chuyển đổi và đã được khóa")
     try:
         assigned_to = int(payload.get("assigned_to_user_id") or 0) or None
     except (TypeError, ValueError) as error:
@@ -1827,7 +2158,8 @@ def assign_lead(
     ):
         raise HTTPException(status_code=404, detail="Tư vấn viên không tồn tại hoặc không hoạt động")
     lead.assigned_to_user_id = assigned_to
-    lead.status = "assigned" if assigned_to else "new"
+    if not assigned_to and lead.status == "assigned":
+        lead.status = "new"
     record_lead_interaction(
         db,
         lead,
@@ -1856,6 +2188,8 @@ def assign_leads_bulk(
     leads = db.scalars(select(Lead).where(Lead.id.in_(lead_ids))).all()
     if len(leads) != len(lead_ids):
         raise HTTPException(status_code=404, detail="Một hoặc nhiều lead không tồn tại")
+    if any(lead.converted_at is not None for lead in leads):
+        raise HTTPException(status_code=409, detail="Lead đã chuyển đổi và đã được khóa")
     assignee = db.get(User, assigned_to) if assigned_to is not None else None
     if assigned_to is not None and (
         assignee is None
@@ -1865,7 +2199,8 @@ def assign_leads_bulk(
         raise HTTPException(status_code=422, detail="Người phụ trách phải là tài khoản tư vấn đang hoạt động")
     for lead in leads:
         lead.assigned_to_user_id = assigned_to
-        lead.status = "assigned" if assigned_to else ("new" if lead.status == "assigned" else lead.status)
+        if not assigned_to and lead.status == "assigned":
+            lead.status = "new"
         record_lead_interaction(
             db,
             lead,
@@ -1888,6 +2223,8 @@ def delete_lead(
     lead = db.get(Lead, lead_id)
     if lead is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy lead")
+    if lead.converted_at is not None:
+        raise HTTPException(status_code=409, detail="Lead đã chuyển đổi và đã được khóa")
     db.execute(delete(LeadInteraction).where(LeadInteraction.lead_id == lead_id))
     db.delete(lead)
     db.commit()
@@ -1907,18 +2244,29 @@ def list_lead_interactions(
     interactions = db.scalars(
         select(LeadInteraction)
         .where(LeadInteraction.lead_id == lead_id)
-        .order_by(LeadInteraction.created_at.desc())
+        .order_by(LeadInteraction.id.desc())
+        .limit(1000)
     ).all()
     return [{
         "id": item.id,
         "action": item.action,
         "note": item.note,
+        "interaction_type": item.interaction_type,
+        "content": item.note,
+        "follow_up_at": (
+            (item.follow_up_at.replace(tzinfo=timezone.utc) if item.follow_up_at.tzinfo is None else item.follow_up_at.astimezone(timezone.utc)).isoformat().replace("+00:00", "Z")
+            if item.follow_up_at else None
+        ),
         "user_name": (
             db.get(User, item.user_id).full_name
             if item.user_id and db.get(User, item.user_id)
             else "Biểu mẫu công khai"
         ),
-        "created_at": item.created_at.isoformat(),
+        "created_at": (
+            item.created_at.replace(tzinfo=timezone.utc)
+            if item.created_at.tzinfo is None
+            else item.created_at.astimezone(timezone.utc)
+        ).isoformat().replace("+00:00", "Z"),
     } for item in interactions]
 
 
@@ -1928,34 +2276,59 @@ def create_lead_interaction(
     user: Annotated[User, Depends(require_permission("leads", "write"))],
     db: DbSession,
     payload: dict[str, Any],
-) -> dict[str, str]:
+) -> dict[str, Any]:
     lead = db.get(Lead, lead_id)
     if lead is None:
         raise HTTPException(status_code=404, detail="Không tìm thấy lead")
     ensure_lead_access(db, user, lead)
-    note = str(payload.get("note", "")).strip()
+    if lead.converted_at is not None:
+        raise HTTPException(status_code=409, detail="Lead đã chuyển đổi và đã được khóa")
+    note = str(payload.get("content", payload.get("note", ""))).strip()
     if not note or len(note) > 2000:
         raise HTTPException(status_code=422, detail="Ghi chú lịch sử phải có từ 1 đến 2000 ký tự")
-    record_lead_interaction(db, lead, user, "note", note)
+    interaction_type = str(payload.get("interaction_type", "message"))
+    if interaction_type not in {"call", "message", "meeting"}:
+        raise HTTPException(status_code=422, detail="Loại tương tác phải là call, message hoặc meeting")
+    try:
+        follow_up_at = None
+        if payload.get("follow_up_at"):
+            dt = datetime.fromisoformat(str(payload["follow_up_at"]).replace("Z", "+00:00"))
+            follow_up_at = dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail="Ngày nhắc lại không hợp lệ") from error
+
+    created_at = None
+    if payload.get("created_at"):
+        try:
+            dt = datetime.fromisoformat(str(payload["created_at"]).replace("Z", "+00:00"))
+            created_at = dt.astimezone(timezone.utc).replace(tzinfo=None) if dt.tzinfo else dt
+        except ValueError:
+            created_at = None
+
+    record_lead_interaction(
+        db, lead, user, interaction_type, note,
+        interaction_type=interaction_type, follow_up_at=follow_up_at,
+        created_at=created_at,
+    )
     db.commit()
-    return {"message": "Đã lưu ghi chú trao đổi"}
+    return {"message": "Đã lưu ghi chú trao đổi", "interaction_type": interaction_type, "follow_up_at": follow_up_at.isoformat() if follow_up_at else None}
 
 
 @app.post("/auth/login", response_model=LoginResponse)
 def login(request: LoginRequest, db: DbSession) -> LoginResponse:
     email = request.email.strip().lower()
     user = db.scalar(select(User).where(User.email == email))
-    if user is None:
-        # Run the same hash work for unknown addresses to reduce account enumeration.
-        verify_password(request.password, "invalid$invalid")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Email hoặc mật khẩu không đúng",
-        )
     now = datetime.now(timezone.utc)
-    locked_until = user.locked_until
+    login_attempt = db.get(LoginAttempt, email)
+    locked_until = login_attempt.locked_until if login_attempt else None
     if locked_until is not None and locked_until.tzinfo is None:
         locked_until = locked_until.replace(tzinfo=timezone.utc)
+    if user and user.locked_until:
+        account_locked_until = user.locked_until
+        if account_locked_until.tzinfo is None:
+            account_locked_until = account_locked_until.replace(tzinfo=timezone.utc)
+        if locked_until is None or account_locked_until > locked_until:
+            locked_until = account_locked_until
     if locked_until is not None and locked_until > now:
         remaining_seconds = max(1, int((locked_until - now).total_seconds()) + 1)
         remaining = max(1, (remaining_seconds + 59) // 60)
@@ -1965,21 +2338,46 @@ def login(request: LoginRequest, db: DbSession) -> LoginResponse:
             headers={"Retry-After": str(remaining_seconds)},
         )
     if locked_until is not None:
-        user.locked_until = None
-        user.failed_login_attempts = 0
-    if not verify_password(request.password, user.password_hash):
-        user.failed_login_attempts += 1
-        if user.failed_login_attempts >= 5:
-            user.locked_until = now + timedelta(minutes=15)
-            user.lock_reason = "Tự động khóa sau 5 lần đăng nhập sai liên tiếp"
-            user.auth_version += 1
-            db.commit()
+        if login_attempt:
+            login_attempt.failed_attempts = 0
+            login_attempt.locked_until = None
+        if user:
+            user.locked_until = None
+            user.failed_login_attempts = 0
+    valid_password = (
+        verify_password(request.password, user.password_hash)
+        if user
+        else verify_password(request.password, "invalid$invalid")
+    )
+    if not valid_password:
+        if login_attempt is None:
+            login_attempt = LoginAttempt(
+                email=email,
+                failed_attempts=user.failed_login_attempts if user else 0,
+            )
+            db.add(login_attempt)
+        login_attempt.failed_attempts += 1
+        if user:
+            user.failed_login_attempts = login_attempt.failed_attempts
+        if login_attempt.failed_attempts >= 5:
+            locked_until = now + timedelta(minutes=15)
+            login_attempt.locked_until = locked_until.replace(tzinfo=None)
+            if user:
+                user.locked_until = locked_until.replace(tzinfo=None)
+                user.lock_reason = "Tự động khóa sau 5 lần đăng nhập sai liên tiếp"
+                user.auth_version += 1
+        db.commit()
+        if login_attempt.failed_attempts >= 5:
             raise HTTPException(
                 status_code=status.HTTP_423_LOCKED,
                 detail="Tài khoản tạm khóa 15 phút sau 5 lần đăng nhập sai",
                 headers={"Retry-After": str(15 * 60)},
             )
-        db.commit()
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email hoặc mật khẩu không đúng",
+        )
+    if user is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email hoặc mật khẩu không đúng",
@@ -1989,6 +2387,9 @@ def login(request: LoginRequest, db: DbSession) -> LoginResponse:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Tài khoản của bạn đã bị khóa, xin liên hệ với quản trị viên.",
         )
+    if login_attempt:
+        login_attempt.failed_attempts = 0
+        login_attempt.locked_until = None
     user.failed_login_attempts = 0
     user.locked_until = None
     db.commit()
@@ -2017,7 +2418,11 @@ def change_password(
 
 @app.post("/auth/forgot-password")
 def forgot_password(request: ForgotPasswordRequest, db: DbSession) -> dict[str, str]:
-    generic_response = {"message": "Nếu email tồn tại, hướng dẫn khôi phục đã được gửi"}
+    generic_response = {
+        "message": (
+            "Nếu email tồn tại, liên kết sẽ được gửi có hiệu lực trong 30 phút và chỉ dùng một lần."
+        )
+    }
     user = db.scalar(select(User).where(User.email == request.email))
     if user is None or not user.is_active:
         return generic_response
@@ -2050,6 +2455,29 @@ def forgot_password(request: ForgotPasswordRequest, db: DbSession) -> dict[str, 
     return generic_response
 
 
+@app.get("/auth/reset-password/validate")
+def validate_reset_password_token(
+    token: Annotated[str, Query(min_length=1)],
+    db: DbSession,
+) -> dict[str, str]:
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    token_record = db.scalar(
+        select(PasswordResetToken).where(
+            PasswordResetToken.token_hash == token_hash,
+            PasswordResetToken.used_at.is_(None),
+            PasswordResetToken.expires_at > now,
+        )
+    )
+    user = db.get(User, token_record.user_id) if token_record else None
+    if token_record is None or user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Liên kết đặt lại mật khẩu không còn hiệu lực",
+        )
+    return {"email": user.email}
+
+
 @app.post("/auth/reset-password")
 def reset_password(
     request: ResetPasswordRequest, db: DbSession
@@ -2067,7 +2495,7 @@ def reset_password(
     if token_record is None or user is None or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Liên kết đặt lại không hợp lệ, đã hết hạn hoặc đã được sử dụng",
+            detail="Liên kết đặt lại mật khẩu không còn hiệu lực",
         )
     claimed = db.execute(
         update(PasswordResetToken)
@@ -2082,7 +2510,7 @@ def reset_password(
         db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Liên kết đặt lại không hợp lệ, đã hết hạn hoặc đã được sử dụng",
+            detail="Liên kết đặt lại mật khẩu không còn hiệu lực",
         )
     user.password_hash = hash_password(request.new_password)
     user.must_change_password = False
@@ -2216,6 +2644,15 @@ def create_user(
     return user_response(db, user)
 
 
+# Register Sprint 3/4 models and routes before FastAPI runs its startup migration.
+import sprint34  # noqa: E402
+import sprint56  # noqa: E402
+import sprint78  # noqa: E402
+
+
+
+
+
 @app.patch("/users/{user_id}", response_model=UserResponse)
 def update_user(
     user_id: int,
@@ -2269,6 +2706,13 @@ def update_user_status(
         )
     user.is_active = request.active
     user.lock_reason = None if request.active else reason
+    if request.active:
+        login_attempt = db.get(LoginAttempt, user.email.lower())
+        if login_attempt:
+            login_attempt.failed_attempts = 0
+            login_attempt.locked_until = None
+        user.failed_login_attempts = 0
+        user.locked_until = None
     if not request.active:
         user.auth_version += 1
     db.commit()
