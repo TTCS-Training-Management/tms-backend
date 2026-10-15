@@ -1,0 +1,6 @@
+@TTCS.EducationManagement.API_HostAddress = http://localhost:5057
+
+GET {{TTCS.EducationManagement.API_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###
