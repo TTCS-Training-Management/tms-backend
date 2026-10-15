@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>Quản lý môn học</title>
+
+    <link rel="stylesheet"
+          href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+
+<body>
+
+    <div class="container">
+
+        <!-- HEADER -->
+        <header class="page-header">
+            <div>
+                <h1>Quản lý môn học</h1>
+                <p>Quản lý môn học và danh sách buổi học</p>
+            </div>
+
+            <button class="btn btn-primary"
+                    onclick="openCreateCourseModal()">
+                + Tạo môn học
+            </button>
+        </header>
+
+        <!-- THÔNG BÁO -->
+        <div id="notification" class="notification"></div>
+
+        <!-- DANH SÁCH MÔN HỌC -->
+        <section class="card">
+
+            <div class="card-header">
+                <div>
+                    <h2>Danh sách môn học</h2>
+                    <p>Danh sách các môn học trong hệ thống</p>
+                </div>
+
+                <button class="btn btn-secondary"
+                        onclick="loadCourses()">
+                    Làm mới
+                </button>
+            </div>
+
+            <div class="table-wrapper">
+
+                <table>
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>Tên môn học</th>
+                            <th>Số buổi</th>
+                            <th>Thao tác</th>
+                        </tr>
+                    </thead>
+
+                    <tbody id="courseTableBody">
+                        <tr>
+                            <td colspan="4" class="text-center">
+                                Đang tải dữ liệu...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+
+            </div>
+
+        </section>
+
+    </div>
+
+
+    <!-- ===================================== -->
+    <!-- MODAL TẠO MÔN HỌC -->
+    <!-- ===================================== -->
+
+    <div id="createCourseModal" class="modal">
+
+        <div class="modal-content">
+
+            <div class="modal-header">
+                <h2>Tạo môn học</h2>
+
+                <button class="modal-close"
+                        onclick="closeModal('createCourseModal')">
+                    &times;
+                </button>
+            </div>
+
+            <form onsubmit="createCourse(event)">
+
+                <div class="form-group">
+
+                    <label for="courseId">
+                        ID môn học
+                    </label>
+
+                    <input
+                        type="number"
+                        id="courseId"
+                        placeholder="Ví dụ: 3"
+                        required
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label for="courseName">
+                        Tên môn học
+                    </label>
+
+                    <input
+                        type="text"
+                        id="courseName"
+                        placeholder="Nhập tên môn học"
+                        required
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label for="totalLessons">
+                        Số buổi học
+                    </label>
+
+                    <input
+                        type="number"
+                        id="totalLessons"
+                        min="1"
+                        placeholder="Ví dụ: 10"
+                        required
+                    >
+
+                </div>
+
+
+                <div class="modal-actions">
+
+                    <button
+                        type="button"
+                        class="btn btn-secondary"
+                        onclick="closeModal('createCourseModal')">
+                        Hủy
+                    </button>
+
+                    <button
+                        type="submit"
+                        class="btn btn-primary">
+                        Tạo môn học
+                    </button>
+
+                </div>
+
+            </form>
+
+        </div>
+
+    </div>
+
+
+    <!-- ===================================== -->
+    <!-- MODAL CHI TIẾT MÔN HỌC -->
+    <!-- ===================================== -->
+
+    <div id="courseDetailModal" class="modal">
+
+        <div class="modal-content modal-large">
+
+            <div class="modal-header">
+
+                <h2 id="detailCourseName">
+                    Chi tiết môn học
+                </h2>
+
+                <button class="modal-close"
+                        onclick="closeModal('courseDetailModal')">
+                    &times;
+                </button>
+
+            </div>
+
+
+            <div id="courseDetailContent">
+
+                <p>Đang tải dữ liệu...</p>
+
+            </div>
+
+
+            <div class="modal-actions">
+
+                <button
+                    class="btn btn-secondary"
+                    onclick="closeModal('courseDetailModal')">
+                    Đóng
+                </button>
+
+                <button
+                    class="btn btn-primary"
+                    onclick="openAddLessonModal()">
+                    + Thêm buổi học
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- ===================================== -->
+    <!-- MODAL THÊM BUỔI HỌC -->
+    <!-- ===================================== -->
+
+    <div id="addLessonModal" class="modal">
+
+        <div class="modal-content">
+
+            <div class="modal-header">
+
+                <h2>Thêm buổi học</h2>
+
+                <button class="modal-close"
+                        onclick="closeModal('addLessonModal')">
+                    &times;
+                </button>
+
+            </div>
+
+
+            <form onsubmit="addLesson(event)">
+
+                <div class="form-group">
+
+                    <label for="lessonOrder">
+                        Số thứ tự
+                    </label>
+
+                    <input
+                        type="number"
+                        id="lessonOrder"
+                        min="1"
+                        placeholder="Ví dụ: 1"
+                        required
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label for="lessonTopic">
+                        Chủ đề
+                    </label>
+
+                    <input
+                        type="text"
+                        id="lessonTopic"
+                        placeholder="Nhập chủ đề buổi học"
+                        required
+                    >
+
+                </div>
+
+
+                <div class="form-group">
+
+                    <label for="lessonObjective">
+                        Mục tiêu
+                    </label>
+
+                    <textarea
+                        id="lessonObjective"
+                        placeholder="Nhập mục tiêu buổi học"
+                        required
+                    ></textarea>
+
+                </div>
+
+
+                <div class="modal-actions">
+
+                    <button
+                        type="button"
+                        class="btn btn-secondary"
+                        onclick="closeModal('addLessonModal')">
+                        Hủy
+                    </button>
+
+                    <button
+                        type="submit"
+                        class="btn btn-primary">
+                        Thêm buổi học
+                    </button>
+
+                </div>
+
+            </form>
+
+        </div>
+
+    </div>
+
+
+    <!-- JAVASCRIPT -->
+
+    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+
+</body>
+</html>

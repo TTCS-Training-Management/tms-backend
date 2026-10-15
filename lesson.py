@@ -10,10 +10,16 @@ class Lesson:
 
 
 class CourseLessonManager:
+
     def __init__(self):
         self.courses = {}
 
-    def create_course(self, course_id: int, course_name: str, total_lessons: int):
+    def create_course(
+        self,
+        course_id: int,
+        course_name: str,
+        total_lessons: int
+    ):
         """
         Tạo một môn học.
         """
@@ -40,7 +46,6 @@ class CourseLessonManager:
         """
         Thêm một buổi học vào môn.
         """
-
         if course_id not in self.courses:
             raise ValueError("Không tìm thấy môn học.")
 
@@ -88,13 +93,15 @@ class CourseLessonManager:
         """
         Lấy danh sách buổi học của một môn.
         """
-
         if course_id not in self.courses:
             raise ValueError("Không tìm thấy môn học.")
 
         course = self.courses[course_id]
 
-        return [asdict(lesson) for lesson in course["lessons"]]
+        return [
+            asdict(lesson)
+            for lesson in course["lessons"]
+        ]
 
     def clone_lessons(
         self,
@@ -105,7 +112,6 @@ class CourseLessonManager:
         Nhân bản danh sách buổi học từ môn nguồn
         sang môn đích.
         """
-
         if source_course_id not in self.courses:
             raise ValueError("Không tìm thấy môn học nguồn.")
 
@@ -142,7 +148,6 @@ class CourseLessonManager:
         """
         Lấy thông tin môn học.
         """
-
         if course_id not in self.courses:
             raise ValueError("Không tìm thấy môn học.")
 
@@ -158,3 +163,17 @@ class CourseLessonManager:
                 for lesson in course["lessons"]
             ]
         }
+
+    def get_all_courses(self):
+        """
+        Lấy danh sách tất cả môn học.
+        """
+        return [
+            {
+                "id": course["id"],
+                "name": course["name"],
+                "total_lessons": course["total_lessons"],
+                "lesson_count": len(course["lessons"])
+            }
+            for course in self.courses.values()
+        ]
