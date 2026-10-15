@@ -15,20 +15,70 @@
     <div class="container">
 
         <!-- HEADER -->
-        <header class="page-header">
-            <div>
-                <h1>Quản lý môn học</h1>
-                <p>Quản lý môn học và danh sách buổi học</p>
-            </div>
+<header class="page-header">
+    <div>
+        <h1>Quản lý đào tạo</h1>
+        <p>Quản lý lớp học, môn học và danh sách buổi học</p>
+    </div>
+    <div class="header-actions">
+        <button class="btn btn-secondary"
+                onclick="loadClasses()">
+            Danh sách lớp
+        </button>
+        <button class="btn btn-primary"
+                onclick="openCreateClassModal()">
+            + Mở lớp học mới
+        </button>
+        <button class="btn btn-primary"
+                onclick="openCreateCourseModal()">
+            + Tạo môn học
+        </button>
+    </div>
+</header>
 
-            <button class="btn btn-primary"
-                    onclick="openCreateCourseModal()">
-                + Tạo môn học
-            </button>
-        </header>
 
         <!-- THÔNG BÁO -->
         <div id="notification" class="notification"></div>
+
+
+<!-- DANH SÁCH LỚP HỌC -->
+<section class="card">
+    <div class="card-header">
+        <div>
+            <h2>Danh sách lớp học</h2>
+            <p>Các lớp học đã được mở trong hệ thống</p>
+        </div>
+
+        <button class="btn btn-secondary"
+                onclick="loadClasses()">
+            Làm mới
+        </button>
+    </div>
+
+    <div class="table-wrapper">
+        <table>
+            <thead>
+                <tr>
+                    <th>Mã lớp</th>
+                    <th>Chương trình</th>
+                    <th>Ngày khai giảng</th>
+                    <th>Sĩ số tối đa</th>
+                    <th>Hình thức học</th>
+                    <th>Trạng thái</th>
+                    <th>Thao tác</th>
+                </tr>
+            </thead>
+
+            <tbody id="classTableBody">
+                <tr>
+                    <td colspan="7" class="text-center">
+                        Đang tải danh sách lớp...
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+</section>
 
         <!-- DANH SÁCH MÔN HỌC -->
         <section class="card">
@@ -308,6 +358,76 @@
 
     </div>
 
+
+<!-- MODAL MỞ LỚP HỌC MỚI -->
+<div id="createClassModal" class="modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h2>Mở lớp học mới</h2>
+
+            <button class="modal-close"
+                    type="button"
+                    onclick="closeModal('createClassModal')">
+                &times;
+            </button>
+        </div>
+
+        <form onsubmit="createClass(event)">
+            <div class="form-group">
+                <label for="classCode">Mã lớp</label>
+                <input id="classCode"
+                       type="text"
+                       placeholder="Ví dụ: CNTT-K26-02"
+                       required>
+            </div>
+
+            <div class="form-group">
+                <label for="classProgram">Chương trình đào tạo</label>
+                <select id="classProgram" required>
+                    <option value="">Đang tải chương trình...</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="classOpeningDate">Ngày khai giảng dự kiến</label>
+                <input id="classOpeningDate"
+                       type="date"
+                       required>
+            </div>
+
+            <div class="form-group">
+                <label for="classMaxStudents">Sĩ số tối đa</label>
+                <input id="classMaxStudents"
+                       type="number"
+                       min="1"
+                       placeholder="Ví dụ: 40"
+                       required>
+            </div>
+
+            <div class="form-group">
+                <label for="classLearningMode">Hình thức học</label>
+                <select id="classLearningMode" required>
+                    <option value="">-- Chọn hình thức học --</option>
+                    <option value="Trực tiếp">Trực tiếp</option>
+                    <option value="Trực tuyến">Trực tuyến</option>
+                    <option value="Kết hợp">Kết hợp</option>
+                </select>
+            </div>
+
+            <div class="modal-actions">
+                <button type="button"
+                        class="btn btn-secondary"
+                        onclick="closeModal('createClassModal')">
+                    Hủy
+                </button>
+
+                <button type="submit" class="btn btn-primary">
+                    Tạo lớp học
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
 
     <!-- JAVASCRIPT -->
 
