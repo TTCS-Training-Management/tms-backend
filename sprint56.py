@@ -208,8 +208,19 @@ def _student_for_user(db: m.Session, user: m.User) -> s34.StudentProfile:
 def _class_access(db: m.Session, user: m.User, class_id: int, module: str, action: str) -> bool:
     if m.permission_allows(m.assigned_roles(db, user), module, "full"):
         return True
-    if module == "attendance" and action == "read" and m.permission_allows(m.assigned_roles(db, user), module, "read"):
-        return s34._can_manage_class(db, user, class_id)
+    if module == "attendance" and action == "read":
+        if s34._can_manage_class(db, user, class_id):
+            return True
+        student_id = db.scalar(select(s34.StudentProfile.id).where(s34.StudentProfile.user_id == user.id))
+        if student_id:
+            enrolled = db.scalar(select(s34.StudentEnrollment.id).where(
+                s34.StudentEnrollment.class_id == class_id,
+                s34.StudentEnrollment.student_id == student_id,
+                s34.StudentEnrollment.status == "active",
+            ))
+            if enrolled:
+                return True
+        return False
     return s34._can_manage_class(db, user, class_id)
 
 
@@ -348,6 +359,11 @@ def attendance_summary(class_id: int, user: m.CurrentUser, db: m.DbSession) -> d
             "attendance_percent": round(100 - pct, 1), "absence_percent": pct,
             "threshold_percent": threshold, "at_risk": risk,
         })
+    roles = m.assigned_roles(db, user)
+    if "student" in roles and not any(r in roles for r in ["admin", "training_manager", "instructor", "ta"]):
+        student_id_val = db.scalar(select(s34.StudentProfile.id).where(s34.StudentProfile.user_id == user.id))
+        if student_id_val:
+            items = [item for item in items if item["student_id"] == student_id_val]
     return {"class_id": class_id, "class_name": training_class.name, "lessons": [
         {"id": lesson.id, "title": lesson.title, "starts_at": lesson.starts_at.isoformat()}
         for lesson in lessons
@@ -848,3 +864,63 @@ def mark_notification_read(notice_id: int, user: m.CurrentUser, db: m.DbSession)
     row.read_at = row.read_at or datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     return {"id": row.id, "read_at": row.read_at.isoformat()}
+
+
+@m.app.get("/audit-logs")
+def list_audit_logs(
+    user: m.CurrentUser,
+    db: m.DbSession,
+    category: str | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    roles = m.assigned_roles(db, user)
+    if not ("admin" in roles or m.permission_allows(roles, "users", "full") or m.permission_allows(roles, "reports", "full")):
+        raise HTTPException(403, "Bạn không có quyền xem nhật ký thao tác dữ liệu nhạy cảm")
+
+    logs: list[dict[str, Any]] = []
+
+    # 1. Grade audits
+    if category in {None, "all", "grade", "grades"}:
+        grade_rows = db.scalars(
+            select(GradeAudit).order_by(GradeAudit.created_at.desc()).limit(limit)
+        ).all()
+        for row in grade_rows:
+            actor = db.get(m.User, row.actor_user_id)
+            sub = db.get(AssignmentSubmission, row.submission_id)
+            assign = db.get(Assignment, sub.assignment_id) if sub else None
+            student = db.get(s34.StudentProfile, sub.student_id) if sub else None
+            logs.append({
+                "id": f"grade-{row.id}",
+                "category": "Điểm số",
+                "action": "Chấm điểm" if row.action == "graded" else ("Công bố điểm" if row.action == "published" else "Yêu cầu làm lại"),
+                "actor_name": actor.full_name if actor else f"User #{row.actor_user_id}",
+                "actor_email": actor.email if actor else "",
+                "target": f"{assign.title if assign else 'Bài tập'} · {student.full_name if student else ''}".strip(" ·"),
+                "detail": row.detail,
+                "created_at": row.created_at.isoformat(),
+            })
+
+    # 2. Attendance audits
+    if category in {None, "all", "attendance"}:
+        att_rows = db.scalars(
+            select(s34.AttendanceAudit).order_by(s34.AttendanceAudit.created_at.desc()).limit(limit)
+        ).all()
+        for row in att_rows:
+            actor = db.get(m.User, row.actor_user_id)
+            att = db.get(s34.Attendance, row.attendance_id)
+            lesson = db.get(s34.TrainingLesson, att.lesson_id) if att else None
+            student = db.get(s34.StudentProfile, att.student_id) if att else None
+            logs.append({
+                "id": f"att-{row.id}",
+                "category": "Chuyên cần",
+                "action": f"Đổi trạng thái ({row.old_status or 'chưa có'} → {row.new_status})",
+                "actor_name": actor.full_name if actor else f"User #{row.actor_user_id}",
+                "actor_email": actor.email if actor else "",
+                "target": f"{lesson.title if lesson else 'Buổi học'} · {student.full_name if student else ''}".strip(" ·"),
+                "detail": row.reason or f"Chuyển trạng thái điểm danh sang {row.new_status}",
+                "created_at": row.created_at.isoformat(),
+            })
+
+    logs.sort(key=lambda x: x["created_at"], reverse=True)
+    return logs[:limit]
+
