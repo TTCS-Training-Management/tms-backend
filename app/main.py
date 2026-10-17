@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from app.routers import auth
 from app.routers import products
+from app.api.attendance import router as attendance_router  # <--- Dòng mới thêm 1
 
 app = FastAPI(
     title="Hệ thống Quản lý Đào tạo - Auth & Authorization API",
@@ -33,8 +35,11 @@ app.include_router(
     tags=["Products"]
 )
 
-
-from fastapi.responses import HTMLResponse
+# Đăng ký Router Điểm danh & Xuất báo cáo Excel (SCRUM-87)
+app.include_router(
+    attendance_router,
+    tags=["Attendance"]
+)  # <--- Dòng mới thêm 2
 
 
 @app.get("/", tags=["Health Check"])
@@ -133,9 +138,9 @@ def test_dashboard():
             const resp = await fetch('/api/products');
             const data = await resp.json();
             badge.textContent = 'HTTP ' + resp.status + ' Unauthorized';
-            resBox.textContent = 'HTTP Status: ' + resp.status + ' Unauthorized\\n'
-                               + 'Request Header: Không có Authorization\\n'
-                               + 'Response Body:\\n' + JSON.stringify(data, null, 2);
+            resBox.textContent = 'HTTP Status: ' + resp.status + ' Unauthorized\n'
+                               + 'Request Header: Không có Authorization\n'
+                               + 'Response Body:\n' + JSON.stringify(data, null, 2);
         }
 
         async function test2() {
@@ -162,10 +167,10 @@ def test_dashboard():
             });
             const data = await resp.json();
             badge.textContent = 'HTTP ' + resp.status + ' Forbidden';
-            resBox.textContent = 'HTTP Status: ' + resp.status + ' Forbidden\\n'
-                               + 'User Role: USER (user1)\\n'
-                               + 'Request Header: Authorization: Bearer ' + token.substring(0, 25) + '...\\n'
-                               + 'Response Body:\\n' + JSON.stringify(data, null, 2);
+            resBox.textContent = 'HTTP Status: ' + resp.status + ' Forbidden\n'
+                               + 'User Role: USER (user1)\n'
+                               + 'Request Header: Authorization: Bearer ' + token.substring(0, 25) + '...\n'
+                               + 'Response Body:\n' + JSON.stringify(data, null, 2);
         }
 
         async function test3() {
@@ -192,10 +197,10 @@ def test_dashboard():
             });
             const data = await resp.json();
             badge.textContent = 'HTTP ' + resp.status + ' Created';
-            resBox.textContent = 'HTTP Status: ' + resp.status + ' Created\\n'
-                               + 'User Role: ADMIN (admin)\\n'
-                               + 'Request Header: Authorization: Bearer ' + token.substring(0, 25) + '...\\n'
-                               + 'Response Body:\\n' + JSON.stringify(data, null, 2);
+            resBox.textContent = 'HTTP Status: ' + resp.status + ' Created\n'
+                               + 'User Role: ADMIN (admin)\n'
+                               + 'Request Header: Authorization: Bearer ' + token.substring(0, 25) + '...\n'
+                               + 'Response Body:\n' + JSON.stringify(data, null, 2);
         }
 
         async function runAllTests() {
@@ -210,4 +215,3 @@ def test_dashboard():
 </body>
 </html>
     """
-
