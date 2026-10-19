@@ -1,5 +1,6 @@
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 pytest
 httpx
+python-multipart
