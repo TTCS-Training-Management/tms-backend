@@ -1,0 +1,34 @@
+
+{% extends "base.html" %}
+{% block content %}
+<h1>{{ announcement.title }}</h1>
+<p class="muted">Ngày tạo: {{ announcement.created_at }}</p>
+<p class="content">{{ announcement.content }}</p>
+
+<h3>Lớp nhận thông báo</h3>
+<p>
+    {% for c in classes %}
+        <span class="tag">{{ c.name }}</span>
+    {% endfor %}
+</p>
+
+<h3>Thống kê đọc thông báo</h3>
+<p>Đã đọc: <strong>{{ read_count }}</strong> / {{ recipients|length }} học viên</p>
+
+<table>
+    <thead>
+        <tr><th>Học viên</th><th>Email</th><th>Trạng thái đọc</th></tr>
+    </thead>
+    <tbody>
+    {% for r in recipients %}
+        <tr>
+            <td>{{ r.name }}</td>
+            <td>{{ r.email }}</td>
+            <td>{{ "Đã đọc" if r.read_at else "Chưa đọc" }}</td>
+        </tr>
+    {% else %}
+        <tr><td colspan="3">Chưa có người nhận.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

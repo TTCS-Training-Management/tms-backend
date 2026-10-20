@@ -1,0 +1,31 @@
+
+{% extends "base.html" %}
+{% block content %}
+<h1>Danh sách thông báo</h1>
+<a class="button" href="{{ url_for('create') }}">+ Tạo thông báo mới</a>
+
+<table>
+    <thead>
+        <tr>
+            <th>Tiêu đề</th>
+            <th>Ngày tạo</th>
+            <th>Người nhận</th>
+            <th>Đã đọc</th>
+            <th>Chi tiết</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for a in announcements %}
+        <tr>
+            <td>{{ a.title }}</td>
+            <td>{{ a.created_at }}</td>
+            <td>{{ a.total_students }}</td>
+            <td>{{ a.read_count or 0 }}</td>
+            <td><a href="{{ url_for('detail', announcement_id=a.id) }}">Xem</a></td>
+        </tr>
+    {% else %}
+        <tr><td colspan="5">Chưa có thông báo nào.</td></tr>
+    {% endfor %}
+    </tbody>
+</table>
+{% endblock %}

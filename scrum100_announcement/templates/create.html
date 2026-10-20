@@ -1,0 +1,23 @@
+
+{% extends "base.html" %}
+{% block content %}
+<h1>Tạo thông báo</h1>
+
+<form method="POST">
+    <label>Tiêu đề</label>
+    <input type="text" name="title" required maxlength="200">
+
+    <label>Nội dung thông báo</label>
+    <textarea name="content" rows="6" required></textarea>
+
+    <label>Chọn lớp nhận thông báo</label>
+    {% for c in classes %}
+        <label class="class-option">
+            <input type="checkbox" name="class_ids" value="{{ c.id }}">
+            {{ c.name }}
+        </label>
+    {% endfor %}
+
+    <button type="submit">Tạo và gửi thông báo</button>
+</form>
+{% endblock %}
