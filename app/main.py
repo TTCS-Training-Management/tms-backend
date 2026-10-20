@@ -1,8 +1,10 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from app.routers import auth
 from app.routers import products
+from app.api.audit_logs import router as audit_logs_router  # <--- Router SCRUM-104
 
 app = FastAPI(
     title="Hệ thống Quản lý Đào tạo - Auth & Authorization API",
@@ -33,8 +35,11 @@ app.include_router(
     tags=["Products"]
 )
 
-
-from fastapi.responses import HTMLResponse
+# Đăng ký Router Nhật ký thao tác (Audit Logs - SCRUM-104)
+app.include_router(
+    audit_logs_router,
+    tags=["Audit Logs"]
+)
 
 
 @app.get("/", tags=["Health Check"])
@@ -210,4 +215,3 @@ def test_dashboard():
 </body>
 </html>
     """
-
