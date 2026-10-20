@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Chi tiết thời khóa biểu{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>{{ schedule["course_name"] }}</h2>
+  <p><strong>Ngày bắt đầu:</strong> {{ schedule["start_date"] }} · <strong>Ca:</strong> {{ schedule["shift"] }} · <strong>Tổng số buổi:</strong> {{ schedule["total_sessions"] }}</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Buổi</th><th>Ngày</th><th>Thứ</th><th>Ca</th><th>Bài học</th></tr></thead>
+    <tbody>{% for item in sessions %}
+      <tr><td>{{ item["session_no"] }}</td><td>{{ item["session_date"] }}</td><td>{{ item["weekday"] }}</td><td>{{ item["shift"] }}</td><td>{{ item["lesson_name"] }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  <a class="button secondary" href="{{ url_for('index') }}">Quay lại trang chủ</a>
+</section>
+{% endblock %}
