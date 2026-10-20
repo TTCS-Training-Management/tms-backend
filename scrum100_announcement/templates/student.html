@@ -1,0 +1,25 @@
+
+{% extends "base.html" %}
+{% block content %}
+<h1>Thông báo của học viên</h1>
+<p>Xin chào, {{ student.name }}.</p>
+
+{% for a in announcements %}
+    <article class="announcement">
+        <h3>{{ a.title }}</h3>
+        <p class="muted">{{ a.created_at }}</p>
+        <p>{{ a.content }}</p>
+        {% if a.read_at %}
+            <span class="tag">Đã đọc lúc {{ a.read_at }}</span>
+        {% else %}
+            <span class="tag unread">Chưa đọc</span>
+            <form method="POST"
+                  action="{{ url_for('mark_read', announcement_id=a.id, student_id=student.id) }}">
+                <button type="submit">Đánh dấu đã đọc</button>
+            </form>
+        {% endif %}
+    </article>
+{% else %}
+    <p>Bạn chưa có thông báo nào.</p>
+{% endfor %}
+{% endblock %}
