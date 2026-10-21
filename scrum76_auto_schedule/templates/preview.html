@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Xem trước thời khóa biểu{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>Xem trước thời khóa biểu</h2>
+  <p><strong>Môn học:</strong> {{ course_name }}</p>
+  <p><strong>Ngày bắt đầu:</strong> {{ start_date }} · <strong>Ca:</strong> {{ shift }} · <strong>Số buổi:</strong> {{ total_sessions }}</p>
+  <p class="muted">Kiểm tra ngày và bài học bên dưới. Chỉ bấm xác nhận khi lịch đã đúng.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Buổi</th><th>Ngày</th><th>Thứ</th><th>Ca</th><th>Bài học</th></tr></thead>
+    <tbody>{% for row in rows %}
+      <tr><td>{{ row.number }}</td><td>{{ row.date }}</td><td>{{ row.weekday }}</td><td>{{ row.shift }}</td><td>{{ row.lesson }}</td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  <form method="post" action="{{ url_for('save_schedule') }}">
+    <input type="hidden" name="course_name" value="{{ course_name }}">
+    <input type="hidden" name="start_date" value="{{ start_date }}">
+    <input type="hidden" name="shift" value="{{ shift }}">
+    <input type="hidden" name="total_sessions" value="{{ total_sessions }}">
+    {% for day in weekdays %}<input type="hidden" name="weekdays" value="{{ day }}">{% endfor %}
+    <textarea name="lessons" hidden>{{ lesson_lines | join('\n') }}</textarea>
+    <button class="button" type="submit">Xác nhận và lưu lịch</button>
+    <a class="button secondary" href="{{ url_for('index') }}">Quay lại chỉnh sửa</a>
+  </form>
+</section>
+{% endblock %}

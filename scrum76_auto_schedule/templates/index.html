@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}Sinh thời khóa biểu tự động{% endblock %}
+{% block content %}
+<section class="panel">
+  <h2>Tạo thời khóa biểu theo mẫu lặp</h2>
+  <p class="muted">Chọn các thứ trong tuần, ca học, ngày bắt đầu và số buổi. Ngày nghỉ đã khai báo sẽ được tự động bỏ qua.</p>
+  <form method="post" action="{{ url_for('preview_schedule') }}">
+    <div class="field">
+      <label>Tên môn học</label>
+      <input name="course_name" required maxlength="150" placeholder="Ví dụ: Lập trình Python">
+    </div>
+    <div class="grid">
+      <div class="field">
+        <label>Ngày bắt đầu</label>
+        <input type="date" name="start_date" required>
+      </div>
+      <div class="field">
+        <label>Ca học</label>
+        <select name="shift" required>
+          {% for shift in shifts %}<option value="{{ shift }}">{{ shift }}</option>{% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label>Tổng số buổi</label>
+        <input type="number" name="total_sessions" min="1" max="300" required placeholder="Ví dụ: 60">
+      </div>
+    </div>
+    <div class="field">
+      <label>Các thứ học trong tuần</label>
+      <div class="checks">
+        {% for key, day in weekdays.items() %}
+        <label class="check"><input type="checkbox" name="weekdays" value="{{ key }}"> {{ day }}</label>
+        {% endfor %}
+      </div>
+    </div>
+    <div class="field">
+      <label>Danh sách bài học (mỗi bài trên một dòng, đúng bằng tổng số buổi)</label>
+      <textarea name="lessons" rows="7" required placeholder="Bài 1: Giới thiệu môn học&#10;Bài 2: Kiến thức cơ bản&#10;Bài 3: Thực hành..."></textarea>
+      <small>Ví dụ: nếu tổng số buổi là 3, hãy nhập đúng 3 dòng bài học.</small>
+    </div>
+    <button class="button" type="submit">Xem trước thời khóa biểu</button>
+  </form>
+</section>
+
+<section class="panel">
+  <h2>Ngày nghỉ đã khai báo</h2>
+  <form method="post" action="{{ url_for('add_holiday') }}" class="holiday-form">
+    <div class="field">
+      <label>Ngày nghỉ</label>
+      <input type="date" name="holiday_date" required>
+    </div>
+    <div class="field">
+      <label>Lý do / tên ngày nghỉ</label>
+      <input name="description" required placeholder="Ví dụ: Nghỉ lễ Quốc khánh">
+    </div>
+    <button class="button" type="submit">Thêm ngày nghỉ</button>
+  </form>
+  {% if holidays %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Ngày</th><th>Mô tả</th><th>Thao tác</th></tr></thead>
+    <tbody>
+    {% for holiday in holidays %}
+      <tr>
+        <td>{{ holiday["holiday_date"] }}</td><td>{{ holiday["description"] }}</td>
+        <td><form method="post" action="{{ url_for('delete_holiday', holiday_date=holiday['holiday_date']) }}" onsubmit="return confirm('Xóa ngày nghỉ này?')"><button class="button danger" type="submit">Xóa</button></form></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+  {% else %}<p class="muted">Chưa có ngày nghỉ nào. Hãy khai báo ngày nghỉ trước khi sinh lịch.</p>{% endif %}
+</section>
+
+<section class="panel">
+  <h2>Thời khóa biểu đã lưu</h2>
+  {% if schedules %}
+  <div class="table-wrap"><table>
+    <thead><tr><th>Môn học</th><th>Ngày bắt đầu</th><th>Ca học</th><th>Số buổi</th><th>Chi tiết</th></tr></thead>
+    <tbody>{% for item in schedules %}
+      <tr><td>{{ item["course_name"] }}</td><td>{{ item["start_date"] }}</td><td>{{ item["shift"] }}</td><td>{{ item["total_sessions"] }}</td><td><a href="{{ url_for('schedule_detail', schedule_id=item['id']) }}">Xem lịch</a></td></tr>
+    {% endfor %}</tbody>
+  </table></div>
+  {% else %}<p class="muted">Chưa có thời khóa biểu nào được lưu.</p>{% endif %}
+</section>
+{% endblock %}
