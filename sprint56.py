@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-from fastapi import Depends, File, HTTPException, Query, UploadFile
+from fastapi import Depends, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, or_, select
@@ -23,10 +23,10 @@ import main as m
 import sprint34 as s34
 
 
-MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 UPLOAD_ROOT = m.BACKEND_DIR / "uploads" / "learning"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
-ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".zip", ".txt", ".png", ".jpg", ".jpeg"}
+ALLOWED_UPLOAD_SUFFIXES = {".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".zip", ".txt", ".png", ".jpg", ".jpeg", ".mp4"}
 logger = logging.getLogger(__name__)
 
 
@@ -228,11 +228,20 @@ def _json_material(db: m.Session, item: LearningMaterial, for_student: bool = Fa
     lesson = db.get(s34.TrainingLesson, item.lesson_id)
     if for_student and lesson and lesson.ends_at > datetime.now() and not item.available_early:
         raise HTTPException(403, "Tài liệu chỉ mở sau khi buổi học diễn ra")
+    uploader = db.get(m.User, item.uploaded_by) if item.uploaded_by else None
     return {
-        "id": item.id, "class_id": item.class_id, "lesson_id": item.lesson_id,
-        "lesson_title": lesson.title if lesson else "", "title": item.title,
-        "file_name": item.display_name, "external_url": item.external_url,
-        "available_early": item.available_early, "created_at": item.created_at.isoformat(),
+        "id": item.id,
+        "class_id": item.class_id,
+        "lesson_id": item.lesson_id,
+        "lesson_title": lesson.title if lesson else "",
+        "title": item.title,
+        "type": "FILE" if item.storage_name else "LINK",
+        "file_name": item.display_name,
+        "external_url": item.external_url,
+        "available_early": item.available_early,
+        "uploaded_by": item.uploaded_by,
+        "uploaded_by_name": uploader.full_name if uploader else None,
+        "created_at": item.created_at.isoformat(),
     }
 
 
@@ -242,7 +251,7 @@ async def _save_upload(file: UploadFile) -> tuple[str, str]:
         raise HTTPException(415, "Định dạng tệp này chưa được hỗ trợ")
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if not data or len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(413, "Tệp phải có dung lượng từ 1 byte đến 20MB")
+        raise HTTPException(413, "Tệp phải có dung lượng từ 1 byte đến 50MB")
     storage_name = secrets.token_hex(20) + Path(name).suffix.lower()
     (UPLOAD_ROOT / storage_name).write_bytes(data)
     return storage_name, name
@@ -691,53 +700,183 @@ def list_rubrics(user: m.Annotated[m.User, Depends(m.require_permission("assignm
 
 
 @m.app.get("/materials")
-def list_materials(user: m.CurrentUser, db: m.DbSession, class_id: int | None = None) -> list[dict[str, Any]]:
+def list_materials(
+    user: m.CurrentUser,
+    db: m.DbSession,
+    class_id: int | None = None,
+    lesson_id: int | None = None,
+) -> list[dict[str, Any]]:
     roles = m.assigned_roles(db, user)
     student_id: int | None = None
     if "student" in roles and not m.permission_allows(roles, "materials", "write"):
         student = _student_for_user(db, user)
         student_id = student.id
         classes = select(s34.StudentEnrollment.class_id).where(
-            s34.StudentEnrollment.student_id == student.id, s34.StudentEnrollment.status == "active",
+            s34.StudentEnrollment.student_id == student.id,
+            s34.StudentEnrollment.status == "active",
             s34.StudentEnrollment.effective_from <= date.today(),
-            or_(s34.StudentEnrollment.effective_to.is_(None), s34.StudentEnrollment.effective_to > date.today()))
+            or_(s34.StudentEnrollment.effective_to.is_(None), s34.StudentEnrollment.effective_to > date.today()),
+        )
         statement = select(LearningMaterial).where(LearningMaterial.class_id.in_(classes))
     else:
         _need(user, db, "materials", "read")
         statement = select(LearningMaterial)
         if not m.permission_allows(roles, "materials", "full"):
-            classes = select(s34.ClassSubject.class_id).outerjoin(s34.ClassSubjectTA, s34.ClassSubjectTA.class_subject_id == s34.ClassSubject.id).where(
-                or_(s34.ClassSubject.instructor_id == user.id, s34.ClassSubjectTA.user_id == user.id))
-            statement = statement.where(LearningMaterial.class_id.in_(classes))
+            classes = (
+                select(s34.ClassSubject.class_id)
+                .outerjoin(s34.ClassSubjectTA, s34.ClassSubjectTA.class_subject_id == s34.ClassSubject.id)
+                .where(or_(s34.ClassSubject.instructor_id == user.id, s34.ClassSubjectTA.user_id == user.id))
+            )
+            lesson_classes = select(s34.TrainingLesson.class_id).where(s34.TrainingLesson.instructor_id == user.id)
+            statement = statement.where(or_(LearningMaterial.class_id.in_(classes), LearningMaterial.class_id.in_(lesson_classes)))
     if class_id:
         statement = statement.where(LearningMaterial.class_id == class_id)
-    return [_json_material(db, row, bool(student_id)) for row in db.scalars(statement.order_by(LearningMaterial.created_at.desc()).limit(300)).all()]
+    if lesson_id:
+        statement = statement.where(LearningMaterial.lesson_id == lesson_id)
+    return [
+        _json_material(db, row, bool(student_id))
+        for row in db.scalars(statement.order_by(LearningMaterial.created_at.desc()).limit(300)).all()
+    ]
 
 
 @m.app.post("/materials", status_code=201)
-async def create_material(user: m.Annotated[m.User, Depends(m.require_permission("materials", "write"))],
-                          db: m.DbSession, class_id: int, lesson_id: int, title: str,
-                          available_early: bool = False, external_url: str | None = None,
-                          file: UploadFile | None = File(default=None)) -> dict[str, Any]:
+async def create_material(
+    user: m.Annotated[m.User, Depends(m.require_permission("materials", "write"))],
+    db: m.DbSession,
+    class_id: int,
+    lesson_id: int,
+    title: str = "",
+    available_early: bool = False,
+    external_url: str | None = Form(default=None),
+    file: UploadFile | None = File(default=None),
+    files: list[UploadFile] = File(default=[]),
+    links: str | None = Form(default=None),
+) -> dict[str, Any] | list[dict[str, Any]]:
     lesson = db.get(s34.TrainingLesson, lesson_id)
     if lesson is None or lesson.class_id != class_id:
         raise HTTPException(422, "Buổi học không thuộc lớp đã chọn")
-    if not _class_access(db, user, class_id, "materials", "write"):
+    if not (_class_access(db, user, class_id, "materials", "write") or lesson.instructor_id == user.id):
         raise HTTPException(403, "Bạn chưa được phân công vào lớp này")
-    url = external_url.strip() if external_url else None
-    if url and (urlparse(url).scheme != "https" or not urlparse(url).netloc):
-        raise HTTPException(422, "Liên kết ngoài phải là URL HTTPS")
-    if not title.strip() or len(title) > 200 or not (file or url):
-        raise HTTPException(422, "Cần tiêu đề và tệp hoặc liên kết tài liệu")
-    storage = display = None
-    if file:
-        storage, display = await _save_upload(file)
-    row = LearningMaterial(class_id=class_id, lesson_id=lesson_id, title=title.strip(),
-        storage_name=storage, display_name=display, external_url=url, available_early=available_early, uploaded_by=user.id)
-    db.add(row)
+
+    parsed_links = []
+    raw_links_val = links if isinstance(links, (str, list)) else None
+    raw_ext_url = external_url if isinstance(external_url, str) else None
+    title_str = title if isinstance(title, str) else ""
+
+    if raw_links_val:
+        try:
+            raw_links = json.loads(raw_links_val) if isinstance(raw_links_val, str) else raw_links_val
+            if isinstance(raw_links, list):
+                for l in raw_links:
+                    if isinstance(l, dict) and "url" in l:
+                        u = str(l["url"]).strip()
+                        p = urlparse(u)
+                        if p.scheme not in ("http", "https") or not p.netloc:
+                            raise HTTPException(422, f"Liên kết ngoài không hợp lệ: {u}")
+                        parsed_links.append({"title": str(l.get("title", "")).strip() or u, "url": u})
+                    elif isinstance(l, str):
+                        u = l.strip()
+                        p = urlparse(u)
+                        if p.scheme not in ("http", "https") or not p.netloc:
+                            raise HTTPException(422, f"Liên kết ngoài không hợp lệ: {u}")
+                        parsed_links.append({"title": u, "url": u})
+        except json.JSONDecodeError:
+            raise HTTPException(422, "Dữ liệu liên kết (links) không hợp lệ")
+    elif raw_ext_url:
+        u = raw_ext_url.strip()
+        p = urlparse(u)
+        if p.scheme not in ("http", "https") or not p.netloc:
+            raise HTTPException(422, "Liên kết ngoài phải là URL HTTP hoặc HTTPS")
+        parsed_links.append({"title": title_str.strip() or u, "url": u})
+
+    all_files = []
+    if file and file.filename:
+        all_files.append(file)
+    if files:
+        for f in files:
+            if f and f.filename and f not in all_files:
+                all_files.append(f)
+
+    if not all_files and not parsed_links:
+        if not title.strip():
+            raise HTTPException(422, "Cần tiêu đề và tệp hoặc liên kết tài liệu")
+        raise HTTPException(422, "Cần ít nhất 1 tệp hoặc 1 liên kết tài liệu")
+
+    created_rows = []
+    for f in all_files:
+        storage, display = await _save_upload(f)
+        item_title = title.strip() if (title.strip() and len(all_files) == 1 and not parsed_links) else display
+        row = LearningMaterial(
+            class_id=class_id,
+            lesson_id=lesson_id,
+            title=item_title,
+            storage_name=storage,
+            display_name=display,
+            external_url=None,
+            available_early=available_early,
+            uploaded_by=user.id,
+        )
+        db.add(row)
+        created_rows.append(row)
+
+    for l in parsed_links:
+        row = LearningMaterial(
+            class_id=class_id,
+            lesson_id=lesson_id,
+            title=l["title"],
+            storage_name=None,
+            display_name=None,
+            external_url=l["url"],
+            available_early=available_early,
+            uploaded_by=user.id,
+        )
+        db.add(row)
+        created_rows.append(row)
+
     db.commit()
-    db.refresh(row)
-    return _json_material(db, row)
+    for row in created_rows:
+        db.refresh(row)
+
+    if len(created_rows) == 1 and not files and not links:
+        return _json_material(db, created_rows[0])
+    return [_json_material(db, r) for r in created_rows]
+
+
+@m.app.post("/lessons/{lesson_id}/materials", status_code=201)
+@m.app.post("/sessions/{lesson_id}/materials", status_code=201)
+async def create_lesson_materials(
+    lesson_id: int,
+    user: m.Annotated[m.User, Depends(m.require_permission("materials", "write"))],
+    db: m.DbSession,
+    files: list[UploadFile] = File(default=[]),
+    links: str | None = Form(default=None),
+    available_early: bool = False,
+) -> list[dict[str, Any]]:
+    lesson = db.get(s34.TrainingLesson, lesson_id)
+    if lesson is None:
+        raise HTTPException(404, "Không tìm thấy buổi học")
+    res = await create_material(
+        user=user,
+        db=db,
+        class_id=lesson.class_id,
+        lesson_id=lesson_id,
+        title="",
+        available_early=bool(available_early),
+        external_url=None,
+        file=None,
+        files=files if isinstance(files, list) else [],
+        links=links if isinstance(links, str) else None,
+    )
+    return res if isinstance(res, list) else [res]
+
+
+@m.app.get("/lessons/{lesson_id}/materials")
+@m.app.get("/sessions/{lesson_id}/materials")
+def list_lesson_materials(lesson_id: int, user: m.CurrentUser, db: m.DbSession) -> list[dict[str, Any]]:
+    lesson = db.get(s34.TrainingLesson, lesson_id)
+    if lesson is None:
+        raise HTTPException(404, "Không tìm thấy buổi học")
+    return list_materials(user=user, db=db, class_id=lesson.class_id, lesson_id=lesson_id)
 
 
 @m.app.get("/materials/{material_id}/file")
@@ -747,17 +886,51 @@ def download_material(material_id: int, user: m.CurrentUser, db: m.DbSession) ->
         raise HTTPException(404, "Không tìm thấy tệp học liệu")
     student_id = db.scalar(select(s34.StudentProfile.id).where(s34.StudentProfile.user_id == user.id))
     if student_id is not None:
-        if db.scalar(select(s34.StudentEnrollment.id).where(
-            s34.StudentEnrollment.student_id == student_id, s34.StudentEnrollment.class_id == row.class_id,
-            s34.StudentEnrollment.status == "active")) is None:
+        if (
+            db.scalar(
+                select(s34.StudentEnrollment.id).where(
+                    s34.StudentEnrollment.student_id == student_id,
+                    s34.StudentEnrollment.class_id == row.class_id,
+                    s34.StudentEnrollment.status == "active",
+                )
+            )
+            is None
+        ):
             raise HTTPException(403, "Học liệu không thuộc lớp của bạn")
         _json_material(db, row, True)
     elif not _class_access(db, user, row.class_id, "materials", "read"):
-        raise HTTPException(403, "Bạn không có quyền xem học liệu này")
+        lesson = db.get(s34.TrainingLesson, row.lesson_id)
+        if not (lesson and lesson.instructor_id == user.id):
+            raise HTTPException(403, "Bạn không có quyền xem học liệu này")
     path = UPLOAD_ROOT / row.storage_name
     if not path.is_file():
         raise HTTPException(404, "Tệp học liệu không còn tồn tại")
     return FileResponse(path, filename=row.display_name or row.title)
+
+
+@m.app.get("/materials/{material_id}/download")
+def download_material_alias(material_id: int, user: m.CurrentUser, db: m.DbSession) -> FileResponse:
+    return download_material(material_id=material_id, user=user, db=db)
+
+
+@m.app.delete("/materials/{material_id}")
+def delete_material(
+    material_id: int,
+    user: m.Annotated[m.User, Depends(m.require_permission("materials", "write"))],
+    db: m.DbSession,
+) -> dict[str, str]:
+    row = db.get(LearningMaterial, material_id)
+    if row is None:
+        raise HTTPException(404, "Không tìm thấy học liệu")
+    if not (row.uploaded_by == user.id or _class_access(db, user, row.class_id, "materials", "write")):
+        raise HTTPException(403, "Bạn không có quyền xóa học liệu này")
+    if row.storage_name:
+        path = UPLOAD_ROOT / row.storage_name
+        if path.is_file():
+            path.unlink(missing_ok=True)
+    db.delete(row)
+    db.commit()
+    return {"message": "Đã xóa học liệu thành công"}
 
 
 @m.app.post("/announcements", status_code=201)
